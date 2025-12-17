@@ -37,15 +37,16 @@ export class OpenAIClient extends LLMClientBase {
     /**
      * Optional retry configuration
      */
-    retryConfig?: RetryConfig
+    retryConfig?: RetryConfig,
   ) {
     super(apiKey, apiBase, model, retryConfig);
     // Uses proxy if HTTPS_PROXY or https_proxy is set
     const https_proxy =
       process.env.HTTPS_PROXY || process.env.https_proxy || "";
+    console.log(`[OpenAIClient] apiBase: ${apiBase}`);
     const dispatcher = https_proxy ? new ProxyAgent(https_proxy) : undefined;
     this.client = new OpenAI({
-      apiKey: apiKey,
+      apiKey,
       baseURL: apiBase,
       ...(https_proxy
         ? {
@@ -67,7 +68,7 @@ export class OpenAIClient extends LLMClientBase {
    */
   async _makeApiRequest(
     apiMessages: Record<string, unknown>[],
-    tools?: Tool[]
+    tools?: Tool[],
   ): Promise<any> {
     return this.client.chat.completions.create({
       model: this.model,
@@ -165,7 +166,7 @@ export class OpenAIClient extends LLMClientBase {
    * @returns Tuple of (system_message, api_messages)
    */
   _convertMessages(
-    messages: Message[]
+    messages: Message[],
   ): [string | undefined, Record<string, unknown>[]] {
     const apiMessages = messages.map((message) => {
       if (message.role === "system") {
@@ -226,7 +227,7 @@ export class OpenAIClient extends LLMClientBase {
    */
   _prepareRequest(
     messages: Message[],
-    tools?: Tool[]
+    tools?: Tool[],
   ): { apiMessages: Record<string, unknown>[]; tools?: Tool[] } {
     // TODO: Why does mini-agent ignore systemMessage?
     const [systemMessage, apiMessages] = this._convertMessages(messages);
@@ -261,7 +262,7 @@ export class OpenAIClient extends LLMClientBase {
     }
     const response = await this._makeApiRequest(
       requestParams.apiMessages,
-      requestParams.tools
+      requestParams.tools,
     );
     return this._parseResponse(response);
   }
