@@ -1,15 +1,23 @@
-import fs from "node:fs";
-import path from "node:path";
 import { EventEmitter } from "node:events";
 
 import { Tiktoken } from "js-tiktoken";
 import cl100k_base from "js-tiktoken/ranks/cl100k_base";
 
-import type { LLMClient } from "./llm/base";
+import type { LLMClient } from "./llm";
 import { AgentConfig } from "./config";
 import { AgentLogger } from "./logger";
 import { RetryExhaustedError } from "./retry";
-import type { LLMResponse, Message } from "./schema";
+import {
+  type LLMResponse,
+  type Message,
+  type Content,
+  type UserMessage,
+  type ModelMessage,
+  type ToolMessage,
+  isModelMessage,
+  isToolMessage,
+  isUserMessage,
+} from "./schema";
 import { Tool, ToolResult } from "./tools/base";
 
 const AgentEventDefs = {
@@ -120,34 +128,6 @@ export const AgentEvents = Object.fromEntries(
   Object.keys(AgentEventDefs).map((key) => [key, key]),
 ) as { [K in AgentEventName]: K };
 
-// /** ANSI color codes for terminal output. */
-// class Colors {
-//   /** Reset color. */
-//   static readonly RESET = "\u001b[0m";
-//   /** Bold text. */
-//   static readonly BOLD = "\u001b[1m";
-//   /** Dim text. */
-//   static readonly DIM = "\u001b[2m";
-
-//   // Foreground colors
-//   static readonly RED = "\u001b[31m";
-//   static readonly GREEN = "\u001b[32m";
-//   static readonly YELLOW = "\u001b[33m";
-//   static readonly BLUE = "\u001b[34m";
-//   static readonly MAGENTA = "\u001b[35m";
-//   static readonly CYAN = "\u001b[36m";
-
-//   // Bright colors
-//   static readonly BRIGHT_BLACK = "\u001b[90m";
-//   static readonly BRIGHT_RED = "\u001b[91m";
-//   static readonly BRIGHT_GREEN = "\u001b[92m";
-//   static readonly BRIGHT_YELLOW = "\u001b[93m";
-//   static readonly BRIGHT_BLUE = "\u001b[94m";
-//   static readonly BRIGHT_MAGENTA = "\u001b[95m";
-//   static readonly BRIGHT_CYAN = "\u001b[96m";
-//   static readonly BRIGHT_WHITE = "\u001b[97m";
-// }
-
 /** Conversation context container. */
 export interface Context {
   /** Message history. */
@@ -159,8 +139,6 @@ export interface Context {
 /** Manages conversation context and message history for the agent. */
 export class ContextManager {
   llmClient: LLMClient;
-  workspaceDir: string;
-  systemPrompt: string;
   tokenLimit: number;
   events: AgentEventsEmitter;
   tools: Tool[];
@@ -170,37 +148,26 @@ export class ContextManager {
   skipNextTokenCheck: boolean;
 
   constructor(
-    systemPrompt: string,
     llmClient: LLMClient,
-    tools: Tool[],
-    workspaceDir: string,
     tokenLimit: number = 80000,
     events: AgentEventsEmitter,
+    messages: Message[] = [],
+    tools: Tool[] = [],
   ) {
     this.llmClient = llmClient;
     this.events = events;
 
-    // Workspace handling and prompt enrichment
-    this.workspaceDir = path.resolve(workspaceDir);
-    fs.mkdirSync(this.workspaceDir, { recursive: true });
-    if (!systemPrompt.includes("Current Workspace")) {
-      systemPrompt =
-        `${systemPrompt}\n\n## Current Workspace\n` +
-        `You are currently working in: \`${this.workspaceDir}\`\n` +
-        "All relative paths will be resolved relative to this directory.";
-    }
-
-    this.systemPrompt = systemPrompt;
     this.tokenLimit = tokenLimit;
 
     // Initialize message history with system prompt
-    this.messages = [{ role: "system", content: this.systemPrompt }];
+    this.messages = messages;
 
     // Store tools
     this.tools = tools;
     this.toolDict = new Map(tools.map((tool) => [tool.name, tool]));
 
     // Token usage tracking
+    // TODO: if messages are provided, we may want to calculate initial token usage
     this.apiTotalTokens = 0;
     this.skipNextTokenCheck = false;
   }
@@ -211,35 +178,29 @@ export class ContextManager {
   }
 
   /** Add a user message to context. */
-  addUserMessage(content: string): void {
-    this.messages.push({ role: "user", content });
+  addUserMessage(contents: Content[]): void {
+    this.messages.push({ role: "user", contents: contents });
   }
 
-  /** Add an assistant message to context. */
-  addAssistantMessage(response: LLMResponse): void {
-    this.messages.push({
-      role: "assistant",
-      content: response.content,
-      thinking: response.thinking,
-      tool_calls: response.tool_calls,
-    });
+  /** Add an model message to context. */
+  addModelMessage(response: LLMResponse): void {
+    this.messages.push(response.message);
   }
 
   /** Add a tool result message to context. */
-  addToolMessage(result: ToolResult, toolCallId: string, name: string): void {
-    const content = result.success ? result.content : `Error: ${result.error}`;
+  addToolMessage(result: ToolResult, name: string, toolCallId?: string): void {
     this.messages.push({
       role: "tool",
-      content,
-      tool_call_id: toolCallId,
-      name,
+      id: toolCallId,
+      name: name,
+      result: result,
     });
   }
 
   /** Update API reported token count. */
   updateApiTokens(response: LLMResponse): void {
-    if (response.usage) {
-      this.apiTotalTokens = response.usage.total_tokens;
+    if (response.totalTokens) {
+      this.apiTotalTokens = response.totalTokens;
     }
   }
 
@@ -250,23 +211,28 @@ export class ContextManager {
       let totalTokens = 0;
 
       for (const msg of this.messages) {
-        const content = msg.content;
-        if (typeof content === "string") {
-          totalTokens += enc.encode(content).length;
-        } else if (Array.isArray(content)) {
-          for (const block of content as unknown[]) {
-            if (typeof block === "object" && block !== null) {
+        if (isUserMessage(msg) || isModelMessage(msg)) {
+          for (const block of msg.contents) {
+            if (block.type === "text") {
+              totalTokens += enc.encode(block.text).length;
+            } else {
               totalTokens += enc.encode(JSON.stringify(block)).length;
             }
           }
         }
 
-        if (msg.thinking) {
-          totalTokens += enc.encode(msg.thinking).length;
+        if (isModelMessage(msg) && msg.toolCalls) {
+          totalTokens += enc.encode(JSON.stringify(msg.toolCalls)).length;
         }
 
-        if (msg.tool_calls) {
-          totalTokens += enc.encode(JSON.stringify(msg.tool_calls)).length;
+        if (isToolMessage(msg)) {
+          totalTokens += enc.encode(
+            JSON.stringify({
+              content: msg.result.content,
+              error: msg.result.error,
+              success: msg.result.success,
+            }),
+          ).length;
         }
 
         // Metadata overhead per message (approximately 4 tokens)
@@ -289,22 +255,26 @@ export class ContextManager {
   estimateTokensFallback(): number {
     let totalChars = 0;
     for (const msg of this.messages) {
-      const content = msg.content;
-      if (typeof content === "string") {
-        totalChars += content.length;
-      } else if (Array.isArray(content)) {
-        for (const block of content as unknown[]) {
-          if (typeof block === "object" && block !== null) {
+      if (isModelMessage(msg) || isUserMessage(msg)) {
+        for (const block of msg.contents) {
+          if (block.type === "text") {
+            totalChars += block.text.length;
+          } else {
             totalChars += JSON.stringify(block).length;
           }
         }
       }
 
-      if (msg.thinking) {
-        totalChars += msg.thinking.length;
+      if (isModelMessage(msg) && msg.toolCalls) {
+        totalChars += JSON.stringify(msg.toolCalls).length;
       }
-      if (msg.tool_calls) {
-        totalChars += JSON.stringify(msg.tool_calls).length;
+
+      if (isToolMessage(msg)) {
+        totalChars += JSON.stringify({
+          content: msg.result.content,
+          error: msg.result.error,
+          success: msg.result.success,
+        }).length;
       }
     }
 
@@ -361,7 +331,7 @@ export class ContextManager {
     // Find all user message indices (skip system prompt)
     const userIndices = this.messages
       .map((msg, index) => ({ msg, index }))
-      .filter(({ msg, index }) => msg.role === "user" && index > 0)
+      .filter(({ msg }) => isUserMessage(msg))
       .map(({ index }) => index);
 
     // Need at least 1 user message to perform summary
@@ -377,7 +347,10 @@ export class ContextManager {
     }
 
     // Build new message list
-    const newMessages: Message[] = [this.messages[0]]; // Keep system prompt
+    const newMessages: Message[] =
+      this.messages.length > 0 && this.messages[0].role !== "user"
+        ? [this.messages[0]]
+        : [];
     let summaryCount = 0;
 
     // Iterate through each user message and summarize the execution process after it
@@ -400,7 +373,12 @@ export class ContextManager {
         if (summaryText) {
           const summaryMessage: Message = {
             role: "user",
-            content: `[Assistant Execution Summary]\n\n${summaryText}`,
+            contents: [
+              {
+                type: "text",
+                text: `[Model Execution Summary]\n\n${summaryText}`,
+              },
+            ],
           };
           newMessages.push(summaryMessage);
           summaryCount += 1;
@@ -453,22 +431,21 @@ export class ContextManager {
     // Build summary content
     let summaryContent = `Round ${roundNum} execution process:\n\n`;
     for (const msg of messages) {
-      if (msg.role === "assistant") {
-        const contentText =
-          typeof msg.content === "string"
-            ? msg.content
-            : JSON.stringify(msg.content);
+      if (isModelMessage(msg)) {
+        const textParts =
+          msg.contents?.filter((c) => c.type === "text").map((c) => c.text) ??
+          [];
+        const contentText = textParts.join("\n");
         summaryContent += `Assistant: ${contentText}\n`;
-        if (msg.tool_calls) {
-          const toolNames = msg.tool_calls.map((tc) => tc.function.name);
+        const toolCalls = msg.toolCalls ?? [];
+        if (toolCalls.length > 0) {
+          const toolNames = toolCalls.map((tc) => tc.name);
           summaryContent += `  → Called tools: ${toolNames.join(", ")}\n`;
         }
-      } else if (msg.role === "tool") {
-        const resultPreview =
-          typeof msg.content === "string"
-            ? msg.content
-            : JSON.stringify(msg.content);
-        summaryContent += `  ← Tool returned: ${resultPreview}...\n`;
+      } else if (isToolMessage(msg)) {
+        const result = msg.result;
+        const preview = result.content || result.error || "";
+        summaryContent += `  ← Tool returned: ${preview}...\n`;
       }
     }
 
@@ -476,17 +453,28 @@ export class ContextManager {
     try {
       const summaryPrompt = `Please provide a concise summary of the following Agent execution process:\n\n${summaryContent}\n\nRequirements:\n1. Focus on what tasks were completed and which tools were called\n2. Keep key execution results and important findings\n3. Be concise and clear, within 1000 words\n4. Use English\n5. Do not include "user" related content, only summarize the Agent's execution process`;
 
-      const summaryMsg: Message = { role: "user", content: summaryPrompt };
+      const summaryMsg: Message = {
+        role: "user",
+        contents: [{ type: "text", text: summaryPrompt }],
+      };
       const response = await this.llmClient.generate([
         {
-          role: "system",
-          content:
-            "You are an assistant skilled at summarizing Agent execution processes.",
+          role: "user",
+          contents: [
+            {
+              type: "text",
+              text: "You are an assistant skilled at summarizing Agent execution processes.",
+            },
+          ],
         },
         summaryMsg,
       ]);
 
-      const summaryText = response.content;
+      const summaryText =
+        (response.message.contents ?? [])
+          .filter((c) => c.type === "text")
+          .map((c) => c.text)
+          .join("\n") ?? "";
       // console.log(
       //   `${Colors.BRIGHT_GREEN}✓ Summary for round ${roundNum} generated successfully${Colors.RESET}`,
       // );
@@ -532,17 +520,20 @@ export class Agent {
     private config: AgentConfig,
     /** LLM client used by the agent to generate responses. */
     private llm: LLMClient,
-    systemPrompt: string,
-    tools: Tool[],
+    /** System prompt is used to guide the agent's behavior. */
+    private systemPrompt: string,
+    /** Initial messages for the agent's context. */
+    messages: Message[] = [],
+    /** Tools available to the agent. */
+    tools: Tool[] = [],
   ) {
     // Initialize context manager with tools
     this.contextManager = new ContextManager(
-      systemPrompt,
-      llm,
-      tools,
-      this.config.workspaceDir,
+      this.llm,
       this.config.tokenLimit,
       this.events,
+      messages,
+      tools,
     );
 
     // Initialize logger
@@ -559,6 +550,8 @@ export class Agent {
 
     const maxSteps = this.config.maxSteps;
     let step = 0;
+
+    let finalReply: string = "";
 
     while (step < maxSteps) {
       // Check and summarize message history to prevent context overflow
@@ -592,6 +585,7 @@ export class Agent {
         response = await this.llm.generate(
           this.contextManager.context.messages,
           this.contextManager.context.tools,
+          this.systemPrompt,
         );
         this.events.emit(AgentEvents.llmResponseReceived, {
           response: response,
@@ -606,7 +600,7 @@ export class Agent {
           // );
           this.events.emit(AgentEvents.runFinished, {
             ok: false,
-            msg: `LLM call failed after ${error.attempts} retries.`,
+            msg: errorMsg,
             error: error as RetryExhaustedError,
           });
           return;
@@ -634,8 +628,8 @@ export class Agent {
       //   response.finish_reason ?? null,
       // );
 
-      // Add assistant message to context
-      this.contextManager.addAssistantMessage(response);
+      // Add model message to context
+      this.contextManager.addModelMessage(response);
 
       // Print thinking if present
       // if (response.thinking) {
@@ -654,19 +648,22 @@ export class Agent {
       // }
 
       // Check if task is complete (no tool calls)
-      if (!response.tool_calls || response.tool_calls.length === 0) {
+      if (
+        !response.message.toolCalls ||
+        response.message.toolCalls.length === 0
+      ) {
         this.events.emit(AgentEvents.runFinished, {
           ok: true,
-          msg: response.content,
+          msg: finalReply,
         });
         return;
       }
 
       // Execute tool calls
-      for (const toolCall of response.tool_calls) {
+      for (const toolCall of response.message.toolCalls) {
         const toolCallId = toolCall.id;
-        const functionName = toolCall.function.name;
-        const callArgs = toolCall.function.arguments as Record<string, unknown>;
+        const functionName = toolCall.name;
+        const callArgs = toolCall.args;
 
         // Tool call header
         // console.log(
@@ -688,7 +685,7 @@ export class Agent {
         //   console.log(`   ${Colors.DIM}${line}${Colors.RESET}`);
         // }
         this.events.emit(AgentEvents.toolCallStarted, {
-          toolCallId: toolCallId,
+          toolCallId: toolCallId ?? "",
           functionName: functionName,
           callArgs: callArgs,
         });
@@ -699,7 +696,6 @@ export class Agent {
         if (!tool) {
           result = new ToolResult({
             success: false,
-            content: "",
             error: `Unknown tool: ${functionName}`,
           });
         } else {
@@ -716,7 +712,6 @@ export class Agent {
             const errorTrace = (err as Error).stack ?? "";
             result = new ToolResult({
               success: false,
-              content: "",
               error: `Tool execution failed: ${errorDetail}\n\nTraceback:\n${errorTrace}`,
             });
           }
@@ -742,10 +737,14 @@ export class Agent {
           // );
           this.events.emit(AgentEvents.toolCallFinished, {
             ok: true,
-            toolCallId: toolCallId,
+            toolCallId: toolCallId ?? "",
             functionName: functionName,
             result: result,
           });
+          if (functionName === "final_reply" && result.success) {
+            finalReply = result.content!;
+            result.content = undefined;
+          }
         } else {
           // console.log(
           //   `${Colors.BRIGHT_RED}✗ Error:${Colors.RESET} ` +
@@ -753,14 +752,14 @@ export class Agent {
           // );
           this.events.emit(AgentEvents.toolCallFinished, {
             ok: false,
-            toolCallId: toolCallId,
+            toolCallId: toolCallId ?? "",
             functionName: functionName,
             result: result,
           });
         }
 
         // Add tool result message to context
-        this.contextManager.addToolMessage(result, toolCallId, functionName);
+        this.contextManager.addToolMessage(result, functionName, toolCallId);
       }
 
       step += 1;
