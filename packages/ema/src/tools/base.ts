@@ -1,31 +1,21 @@
 /** Tool execution result. */
-export class ToolResult {
+export interface ToolResult {
   success: boolean;
   content?: string;
   error?: string;
-
-  constructor(options: {
-    success: boolean;
-    content?: string;
-    error?: string | null;
-  }) {
-    this.success = options.success;
-    this.content = options.content ?? undefined;
-    this.error = options.error ?? undefined;
-  }
 }
 
 /** Base class for all tools. */
 export abstract class Tool {
-  /** Tool name. */
-  abstract get name(): string;
+  /** Returns the tool name. */
+  abstract name: string;
 
-  /** Tool description. */
-  abstract get description(): string;
+  /** Returns the tool description. */
+  abstract description: string;
 
-  /** Tool parameters schema (JSON Schema format). */
-  abstract get parameters(): Record<string, any>;
+  /** Returns the tool parameters schema (JSON Schema format). */
+  abstract parameters: Record<string, any>;
 
-  /** Execute the tool with arbitrary arguments. */
+  /** Executes the tool with arbitrary arguments. */
   abstract execute(...args: any[]): Promise<ToolResult>;
 }

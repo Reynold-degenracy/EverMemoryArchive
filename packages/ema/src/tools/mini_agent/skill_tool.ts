@@ -4,14 +4,15 @@
  * Implements Progressive Disclosure (Level 2): Load full skill content when needed
  */
 
-import { Tool, ToolResult } from "./base";
+import { Tool } from "../base";
+import type { ToolResult } from "../base";
 import { SkillLoader } from "./skill_loader";
 
 export class GetSkillTool extends Tool {
   skillLoader: SkillLoader;
 
   constructor(skillLoader: SkillLoader) {
-    /** Tool to get detailed information about a specific skill */
+    /** Initializes the tool to get detailed information about a specific skill. */
     super();
     this.skillLoader = skillLoader;
   }
@@ -39,21 +40,21 @@ export class GetSkillTool extends Tool {
   }
 
   async execute(skill_name: string): Promise<ToolResult> {
-    /** Get detailed information about specified skill */
+    /** Gets detailed information about the specified skill. */
     const skill = this.skillLoader.getSkill(skill_name);
 
     if (!skill) {
       const available = this.skillLoader.listSkills().join(", ");
-      return new ToolResult({
+      return {
         success: false,
         content: "",
         error: `Skill '${skill_name}' does not exist. Available skills: ${available}`,
-      });
+      };
     }
 
     // Return complete skill content
     const result = skill.toPrompt();
-    return new ToolResult({ success: true, content: result });
+    return { success: true, content: result };
   }
 }
 
@@ -61,7 +62,7 @@ export function createSkillTools(
   skillsDir: string = "./skills",
 ): [Tool[], SkillLoader | null] {
   /**
-   * Create skill tool for Progressive Disclosure
+   * Creates skill tools for Progressive Disclosure.
    *
    * Only provides get_skill tool - the agent uses metadata in system prompt
    * to know what skills are available, then loads them on-demand.

@@ -9,14 +9,15 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { Tool, ToolResult } from "./base";
+import { Tool } from "../base";
+import type { ToolResult } from "../base";
 
 export class SessionNoteTool extends Tool {
   memoryFile: string;
 
   constructor(memoryFile: string = "./workspace/.agent_memory.json") {
     /**
-     * Initialize session note tool.
+     * Initializes the session note tool.
      *
      * Args:
      *     memoryFile: Path to the note storage file
@@ -58,7 +59,7 @@ export class SessionNoteTool extends Tool {
   }
 
   async _loadFromFile(): Promise<any[]> {
-    /** Load notes from file.
+    /** Loads notes from the file.
      *
      * Returns empty list if file doesn't exist (lazy loading).
      */
@@ -74,7 +75,7 @@ export class SessionNoteTool extends Tool {
   }
 
   async _saveToFile(notes: any[]): Promise<void> {
-    /** Save notes to file.
+    /** Saves notes to the file.
      *
      * Creates parent directory and file if they don't exist (lazy initialization).
      */
@@ -91,7 +92,7 @@ export class SessionNoteTool extends Tool {
     content: string,
     category: string = "general",
   ): Promise<ToolResult> {
-    /** Record a session note.
+    /** Records a session note.
      *
      * Args:
      *     content: The information to record
@@ -115,16 +116,16 @@ export class SessionNoteTool extends Tool {
       // Save back to file
       await this._saveToFile(notes);
 
-      return new ToolResult({
+      return {
         success: true,
-        content: `Recorded note: ${content} (category: ${category})`,
-      });
+        content: `Recorded note: ${content} (category: ${category}`,
+      };
     } catch (error) {
-      return new ToolResult({
+      return {
         success: false,
         content: "",
         error: `Failed to record note: ${(error as Error).message}`,
-      });
+      };
     }
   }
 }
@@ -134,7 +135,7 @@ export class RecallNoteTool extends Tool {
 
   constructor(memoryFile: string = "./workspace/.agent_memory.json") {
     /**
-     * Initialize recall note tool.
+     * Initializes the recall note tool.
      *
      * Args:
      *     memoryFile: Path to the note storage file
@@ -168,7 +169,7 @@ export class RecallNoteTool extends Tool {
   }
 
   async execute(category: string | null = null): Promise<ToolResult> {
-    /** Recall session notes.
+    /** Recalls session notes.
      *
      * Args:
      *     category: Optional category filter
@@ -184,19 +185,19 @@ export class RecallNoteTool extends Tool {
         ) as any[];
       } catch (error) {
         if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
-          return new ToolResult({
+          return {
             success: true,
             content: "No notes recorded yet.",
-          });
+          };
         }
         throw error;
       }
 
       if (!notes?.length) {
-        return new ToolResult({
+        return {
           success: true,
           content: "No notes recorded yet.",
-        });
+        };
       }
 
       // Filter by category if specified
@@ -204,10 +205,10 @@ export class RecallNoteTool extends Tool {
       if (category) {
         filteredNotes = notes.filter((n) => n?.category === category);
         if (!filteredNotes.length) {
-          return new ToolResult({
+          return {
             success: true,
             content: `No notes found in category: ${category}`,
-          });
+          };
         }
       }
 
@@ -224,13 +225,13 @@ export class RecallNoteTool extends Tool {
 
       const result = "Recorded Notes:\n" + formatted.join("\n");
 
-      return new ToolResult({ success: true, content: result });
+      return { success: true, content: result };
     } catch (error) {
-      return new ToolResult({
+      return {
         success: false,
         content: "",
         error: `Failed to recall notes: ${(error as Error).message}`,
-      });
+      };
     }
   }
 }

@@ -8,15 +8,20 @@ import { ChildProcess, spawn, type StdioOptions } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { EOL } from "node:os";
 
-import { Tool, ToolResult } from "./base";
+import { Tool } from "../base";
+import type { ToolResult } from "../base";
 
-class BashOutputResult extends ToolResult {
+class BashOutputResult implements ToolResult {
+  success: boolean;
+  content?: string;
+  error?: string;
   /** Bash command execution result with separated stdout and stderr.
    *
-   * Inherits from ToolResult which provides:
-   * - success: bool
-   * - content: str (used for formatted output message, auto-generated from stdout/stderr)
-   * - error: str | None (used for error messages)
+   * Implements ToolResult fields plus:
+   * - stdout: str (raw stdout)
+   * - stderr: str (raw stderr)
+   * - exitCode: int (process exit code)
+   * - bashId: str | null (background session id)
    */
   stdout: string;
   stderr: string;
@@ -32,11 +37,9 @@ class BashOutputResult extends ToolResult {
     content?: string;
     error?: string | null;
   }) {
-    super({
-      success: options.success,
-      content: options.content ?? "",
-      error: options.error ?? null,
-    });
+    this.success = options.success;
+    this.content = options.content ?? "";
+    this.error = options.error ?? undefined;
     this.stdout = options.stdout;
     this.stderr = options.stderr;
     this.exitCode = options.exitCode;
@@ -102,12 +105,12 @@ class BackgroundShell {
   }
 
   addStdout(line: string): void {
-    /** Add new stdout line. */
+    /** Adds a new stdout line. */
     this.stdoutLines.push(line);
   }
 
   addStderr(line: string): void {
-    /** Add new stderr line. */
+    /** Adds a new stderr line. */
     this.stderrLines.push(line);
   }
 
@@ -115,7 +118,7 @@ class BackgroundShell {
     stdoutLines: string[];
     stderrLines: string[];
   } {
-    /** Get new output since last check, optionally filtered by regex. */
+    /** Gets new output since last check, optionally filtered by regex. */
     const stdoutNewLines = this.stdoutLines.slice(this.stdoutLastReadIndex);
     const stderrNewLines = this.stderrLines.slice(this.stderrLastReadIndex);
     this.stdoutLastReadIndex = this.stdoutLines.length;
@@ -137,7 +140,7 @@ class BackgroundShell {
   }
 
   updateStatus(isAlive: boolean, exitCode: number | null = null): void {
-    /** Update process status. */
+    /** Updates process status. */
     if (!isAlive) {
       this.status = exitCode === 0 ? "completed" : "failed";
       this.exitCode = exitCode;
@@ -147,7 +150,7 @@ class BackgroundShell {
   }
 
   async terminate(): Promise<void> {
-    /** Terminate the background process. */
+    /** Terminates the background process. */
     if (this.process.exitCode === null) {
       const gracefulTimeoutMs = 5000;
       const exitedGracefully = await new Promise<boolean>((resolve) => {
@@ -191,27 +194,27 @@ class BackgroundShellManager {
   static _shells: Map<string, BackgroundShell> = new Map();
 
   static add(shell: BackgroundShell): void {
-    /** Add a background shell to management. */
+    /** Adds a background shell to management. */
     this._shells.set(shell.bashId, shell);
   }
 
   static get(bashId: string): BackgroundShell | undefined {
-    /** Get a background shell by ID. */
+    /** Gets a background shell by ID. */
     return this._shells.get(bashId);
   }
 
   static getAvailableIds(): string[] {
-    /** Get all available bash IDs. */
+    /** Gets all available bash IDs. */
     return Array.from(this._shells.keys());
   }
 
   static _remove(bashId: string): void {
-    /** Remove a background shell from management (internal use only). */
+    /** Removes a background shell from management (internal use only). */
     this._shells.delete(bashId);
   }
 
   static startMonitor(bashId: string): void {
-    /** Start monitoring a background shell's output. */
+    /** Starts monitoring a background shell's output. */
     const shell = this.get(bashId);
     if (!shell) return;
 
@@ -249,7 +252,7 @@ class BackgroundShellManager {
   }
 
   static async terminate(bashId: string): Promise<BackgroundShell> {
-    /** Terminate a background shell and clean up all resources.
+    /** Terminates a background shell and cleans up all resources.
      *
      * Args:
      *     bashId: The unique identifier of the background shell
@@ -272,7 +275,7 @@ class BackgroundShellManager {
 }
 
 export class BashTool extends Tool {
-  /** Execute shell commands in foreground or background.
+  /** Executes shell commands in foreground or background.
    *
    * Automatically detects OS and uses appropriate shell:
    * - Windows: PowerShell
@@ -283,7 +286,7 @@ export class BashTool extends Tool {
   shellName: string;
 
   constructor() {
-    /** Initialize BashTool with OS-specific shell detection. */
+    /** Initializes BashTool with OS-specific shell detection. */
     super();
     this.isWindows = os.platform() === "win32";
     this.shellName = this.isWindows ? "PowerShell" : "bash";
@@ -368,7 +371,7 @@ Examples:
     timeout: number = 120,
     runInBackground: boolean = false,
   ): Promise<ToolResult> {
-    /** Execute shell command with optional background execution.
+    /** Executes a shell command with optional background execution.
      *
      * Args:
      *     command: The shell command to execute
@@ -504,7 +507,7 @@ Examples:
 }
 
 export class BashOutputTool extends Tool {
-  /** Retrieve output from background bash shells. */
+  /** Retrieves output from background bash shells. */
 
   get name(): string {
     return "bash_output";
@@ -553,7 +556,7 @@ export class BashOutputTool extends Tool {
     bashId: string,
     filterStr: string | null = null,
   ): Promise<ToolResult> {
-    /** Retrieve output from background shell.
+    /** Retrieves output from background shell.
      *
      * Args:
      *     bashId: The unique identifier of the background shell
@@ -599,7 +602,7 @@ export class BashOutputTool extends Tool {
 }
 
 export class BashKillTool extends Tool {
-  /** Terminate a running background bash shell. */
+  /** Terminates a running background bash shell. */
 
   get name(): string {
     return "bash_kill";
@@ -633,7 +636,7 @@ export class BashKillTool extends Tool {
   }
 
   async execute(bashId: string): Promise<ToolResult> {
-    /** Terminate a background shell process.
+    /** Terminates a background shell process.
      *
      * Args:
      *     bashId: The unique identifier of the background shell to terminate
