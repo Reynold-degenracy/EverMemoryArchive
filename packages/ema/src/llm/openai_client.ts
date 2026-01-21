@@ -17,6 +17,7 @@ import type {
 import type { Tool } from "../tools/base";
 import { wrapWithRetry } from "../retry";
 import type { LLMApiConfig, RetryConfig } from "../config";
+import { FetchWithProxy } from "./proxy";
 
 /** OpenAI-compatible client that adapts EMA schema to Chat Completions. */
 export class OpenAIClient extends LLMClientBase implements SchemaAdapter {
@@ -31,6 +32,9 @@ export class OpenAIClient extends LLMClientBase implements SchemaAdapter {
     const options: ClientOptions = {
       apiKey: config.key,
       baseURL: config.base_url,
+      fetch: new FetchWithProxy(
+        process.env.HTTPS_PROXY || process.env.https_proxy,
+      ).createFetcher(),
     };
     this.client = new OpenAI(options);
   }
@@ -177,16 +181,20 @@ export class OpenAIClient extends LLMClientBase implements SchemaAdapter {
     apiMessages: Record<string, unknown>[],
     apiTools?: Record<string, unknown>[],
     systemPrompt?: string,
+    signal?: AbortSignal,
   ): Promise<any> {
     const messages = systemPrompt
       ? [{ role: "system", content: systemPrompt }, ...apiMessages]
       : apiMessages;
 
-    return this.client.chat.completions.create({
-      model: this.model,
-      messages: messages as any[],
-      tools: apiTools as any[],
-    });
+    return this.client.chat.completions.create(
+      {
+        model: this.model,
+        messages: messages as any[],
+        tools: apiTools as any[],
+      },
+      { signal },
+    );
   }
 
   /** Public generate entrypoint matching LLMClientBase. */
@@ -194,6 +202,7 @@ export class OpenAIClient extends LLMClientBase implements SchemaAdapter {
     messages: Message[],
     tools?: Tool[],
     systemPrompt?: string,
+    signal?: AbortSignal,
   ): Promise<LLMResponse> {
     const apiMessages = this.adaptMessages(messages);
     const apiTools = tools ? this.adaptTools(tools) : undefined;
@@ -206,7 +215,12 @@ export class OpenAIClient extends LLMClientBase implements SchemaAdapter {
         )
       : this.makeApiRequest.bind(this);
 
-    const response = await executor(apiMessages, apiTools, systemPrompt);
+    const response = await executor(
+      apiMessages,
+      apiTools,
+      systemPrompt,
+      signal,
+    );
 
     return this.adaptResponseFromAPI(response);
   }

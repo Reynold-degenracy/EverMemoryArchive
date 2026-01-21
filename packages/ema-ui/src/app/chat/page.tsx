@@ -1,14 +1,16 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import styles from "./page.module.css";
-import type { Message, ActorEvent } from "ema";
+import type { ActorAgentEvent, Message } from "ema";
 
 // todo: consider adding tests for this component to verify message state management
 export default function ChatPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
+  const chatAreaRef = useRef<HTMLDivElement | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const shouldAutoScrollRef = useRef(true);
 
   // Set up SSE connection to subscribe to actor events
   useEffect(() => {
@@ -16,34 +18,20 @@ export default function ChatPage() {
 
     eventSource.onmessage = (event) => {
       try {
-        const response = JSON.parse(event.data);
-
-        // Process events from the actor
-        if (response.events && Array.isArray(response.events)) {
-          response.events.forEach((evt: ActorEvent) => {
-            console.log("evt", evt);
-
-            const content = evt.content;
-            // Handles LLM response which contains the assistant's message
-            if (
-              evt.type === "emaReplyReceived" &&
-              typeof content === "object" &&
-              "reply" in content
-            ) {
-              setMessages((prev) => [
-                ...prev,
-                {
-                  role: "model",
-                  contents: [{ type: "text", text: content.reply.response }],
-                },
-              ]);
-            }
-          });
-        }
-
-        // Update loading state based on actor status
-        if (response.status === "idle") {
-          setIsLoading(false);
+        const evt = JSON.parse(event.data) as ActorAgentEvent;
+        const content = evt.content;
+        if (
+          evt.kind === "emaReplyReceived" &&
+          typeof content === "object" &&
+          "reply" in content
+        ) {
+          setMessages((prev) => [
+            ...prev,
+            {
+              role: "model",
+              contents: [{ type: "text", text: content.reply.response }],
+            },
+          ]);
         }
       } catch (error) {
         console.error("Error parsing SSE event:", error);
@@ -62,9 +50,22 @@ export default function ChatPage() {
     };
   }, []);
 
+  useEffect(() => {
+    const chatArea = chatAreaRef.current;
+    if (!chatArea) {
+      return;
+    }
+    if (shouldAutoScrollRef.current) {
+      messagesEndRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "end",
+      });
+    }
+  }, [messages.length]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!inputValue.trim() || isLoading) return;
+    if (!inputValue.trim()) return;
 
     const userMessage: Message = {
       role: "user",
@@ -75,8 +76,6 @@ export default function ChatPage() {
     const updatedMessages = [...messages, userMessage];
     setMessages(updatedMessages);
     setInputValue("");
-    setIsLoading(true);
-
     try {
       // Send input to actor using the new API
       const response = await fetch("/api/actor/input", {
@@ -88,7 +87,7 @@ export default function ChatPage() {
           userId: 1,
           actorId: 1,
           // TODO: If supporting more input types, need to adjust here
-          inputs: [{ kind: "text", content: userMessage.contents[0].text }],
+          inputs: userMessage.contents,
         }),
       });
 
@@ -99,7 +98,6 @@ export default function ChatPage() {
       }
 
       // Response will come through SSE, so we don't need to process it here
-      // Note: isLoading remains true until SSE event with status 'idle' arrives
     } catch (error) {
       console.error("Error:", error);
       // Add error message to chat
@@ -113,8 +111,6 @@ export default function ChatPage() {
         ],
       };
       setMessages([...updatedMessages, errorMessage]);
-      // Reset loading state since no SSE event will come if the request failed
-      setIsLoading(false);
     }
   };
 
@@ -124,7 +120,20 @@ export default function ChatPage() {
         <h1 className={styles.title}>How can I help you?</h1>
       </div>
 
-      <div className={styles.chatArea}>
+      <div
+        className={styles.chatArea}
+        ref={chatAreaRef}
+        onScroll={() => {
+          const chatArea = chatAreaRef.current;
+          if (!chatArea) {
+            return;
+          }
+          const gap = 80;
+          const distanceToBottom =
+            chatArea.scrollHeight - chatArea.scrollTop - chatArea.clientHeight;
+          shouldAutoScrollRef.current = distanceToBottom <= gap;
+        }}
+      >
         {messages.length === 0 ? (
           <div className={styles.emptyState}>
             Start a conversation with MeowGPT
@@ -149,6 +158,7 @@ export default function ChatPage() {
                 </div>
               </div>
             ))}
+            <div ref={messagesEndRef} className={styles.messagesEnd} />
           </div>
         )}
       </div>
@@ -161,14 +171,13 @@ export default function ChatPage() {
           placeholder="Enter message..."
           value={inputValue}
           onChange={(e) => setInputValue(e.target.value)}
-          disabled={isLoading}
         />
         <div className={styles.buttonGroup}>
           <button
             type="submit"
             aria-label="Send message"
             className={styles.sendButton}
-            disabled={isLoading || !inputValue.trim()}
+            disabled={!inputValue.trim()}
           >
             <svg
               width="16"

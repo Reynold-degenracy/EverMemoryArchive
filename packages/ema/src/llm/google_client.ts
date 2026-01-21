@@ -17,6 +17,31 @@ import type {
   LLMResponse,
 } from "../schema";
 import type { LLMApiConfig, RetryConfig } from "../config";
+import { FetchWithProxy } from "./proxy";
+
+/**
+ * A wrapper around the GoogleGenAI class that uses a custom fetch implementation.
+ */
+class GenAI extends GoogleGenAI {
+  constructor(
+    options: GoogleGenAIOptions,
+    private readonly fetcher: (
+      url: string,
+      requestInit?: RequestInit,
+    ) => Promise<Response>,
+  ) {
+    super(options);
+    if (!(this.apiClient as any).apiCall) {
+      throw new Error("apiCall cannot be patched");
+    }
+    // Monkey patches apiCall to use our fetch.
+    (this.apiClient as any).apiCall = async (url: string, requestInit: any) => {
+      return this.fetcher(url, requestInit).catch((e) => {
+        throw new Error(`exception ${e} sending request`);
+      });
+    };
+  }
+}
 
 /** Google Generative AI client that adapts EMA schema to the native Gemini API format. */
 export class GoogleClient extends LLMClientBase implements SchemaAdapter {
@@ -34,7 +59,12 @@ export class GoogleClient extends LLMClientBase implements SchemaAdapter {
         baseUrl: config.base_url,
       },
     };
-    this.client = new GoogleGenAI(options);
+    this.client = new GenAI(
+      options,
+      new FetchWithProxy(
+        process.env.HTTPS_PROXY || process.env.https_proxy,
+      ).createFetcher(),
+    );
   }
 
   /** Map EMA message shape to Gemini request content. */
@@ -147,6 +177,7 @@ export class GoogleClient extends LLMClientBase implements SchemaAdapter {
     apiMessages: Record<string, unknown>[],
     apiTools?: Record<string, unknown>[],
     systemPrompt?: string,
+    signal?: AbortSignal,
   ): Promise<any> {
     return this.client.models.generateContent({
       model: this.model,
@@ -155,6 +186,7 @@ export class GoogleClient extends LLMClientBase implements SchemaAdapter {
         candidateCount: 1,
         systemInstruction: systemPrompt,
         tools: apiTools ? [{ functionDeclarations: apiTools }] : [],
+        abortSignal: signal,
         thinkingConfig: ["gemini-3-flash-preview", "gemini-3-flash"].includes(
           this.model,
         )
@@ -171,6 +203,7 @@ export class GoogleClient extends LLMClientBase implements SchemaAdapter {
     messages: Message[],
     tools?: Tool[],
     systemPrompt?: string,
+    signal?: AbortSignal,
   ): Promise<LLMResponse> {
     const apiMessages = this.adaptMessages(messages);
     const apiTools = tools ? this.adaptTools(tools) : undefined;
@@ -183,7 +216,12 @@ export class GoogleClient extends LLMClientBase implements SchemaAdapter {
         )
       : this.makeApiRequest.bind(this);
 
-    const response = await executor(apiMessages, apiTools, systemPrompt);
+    const response = await executor(
+      apiMessages,
+      apiTools,
+      systemPrompt,
+      signal,
+    );
 
     return this.adaptResponseFromAPI(response);
   }

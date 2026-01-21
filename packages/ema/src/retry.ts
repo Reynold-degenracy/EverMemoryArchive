@@ -69,6 +69,16 @@ export class RetryExhaustedError extends Error {
   }
 }
 
+export function isAbortError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  if (error.name === "AbortError") {
+    return true;
+  }
+  return error.message.toLowerCase().includes("abort");
+}
+
 /**
  * Async function retry decorator.
  */
@@ -95,6 +105,9 @@ export function asyncRetry(
           return await originalMethod.apply(this, args);
         } catch (exception) {
           lastException = exception as Error;
+          if (isAbortError(lastException)) {
+            throw lastException;
+          }
           if (attempt >= config.max_retries) {
             console.error(
               `Function ${propertyKey} retry failed, reached maximum retry count ${config.max_retries}`,

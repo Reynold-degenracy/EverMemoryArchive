@@ -1,4 +1,15 @@
-import type { Message } from "../schema";
+import type { Content } from "../schema";
+
+/**
+ * Represents a persisted message with metadata for buffer history.
+ */
+export interface BufferMessage {
+  kind: "user" | "actor";
+  name: string;
+  id: number;
+  contents: Content[];
+  time: number;
+}
 
 /**
  * Interface for persisting actor state
@@ -18,11 +29,6 @@ export interface ActorStateStorage {
 }
 
 export interface ActorState {
-  /**
-   * The memory buffer, in the format of messages in OpenAI chat completion API.
-   */
-
-  memoryBuffer: Message[];
   // more state can be added here.
 }
 
@@ -64,7 +70,7 @@ export interface ShortTermMemory {
   /**
    * The granularity of short term memory
    */
-  kind: "year" | "month" | "day";
+  kind: "year" | "month" | "week" | "day";
   /**
    * The os when the actor saw the messages.
    */
