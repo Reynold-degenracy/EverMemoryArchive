@@ -195,6 +195,22 @@ export interface ActorEntity extends Entity {
    */
   channelConfig?: ChannelConfig;
   /**
+   * How this actor was created.
+   */
+  origin?: "blank" | "imported" | "training";
+  /**
+   * Lifecycle state for actors created by replay training.
+   */
+  trainingStatus?: "pending" | "running" | "completed" | "failed";
+  /**
+   * Latest replay training error message, when training failed.
+   */
+  trainingErrorMessage?: string;
+  /**
+   * Last replay training state update time.
+   */
+  trainingUpdatedAt?: DbDate;
+  /**
    * The date and time the actor was last updated
    */
   updatedAt?: DbDate;
@@ -921,6 +937,10 @@ export interface ListLongTermMemoriesRequest {
    * The actor ID to filter long term memories by
    */
   actorId?: number;
+  /**
+   * Max number of memories to return
+   */
+  limit?: number;
   /**
    * Filter long term memories created before the given date and time
    */

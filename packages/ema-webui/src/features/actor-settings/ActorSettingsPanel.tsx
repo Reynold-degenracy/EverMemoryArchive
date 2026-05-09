@@ -9,6 +9,7 @@ import {
   type CSSProperties,
   type ChangeEvent as ReactChangeEvent,
 } from "react";
+import { createPortal } from "react-dom";
 import {
   Activity,
   Bot,
@@ -16,7 +17,9 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  Clock3,
   Globe,
+  GraduationCap,
   Info,
   Link as LinkIcon,
   LoaderCircle,
@@ -32,6 +35,7 @@ import {
   Send,
   Smile,
   SquareArrowOutUpRight,
+  Terminal,
   Trash2,
   Unlink,
   User,
@@ -41,6 +45,7 @@ import {
 
 import styles from "@/app/dashboard/page.module.css";
 import {
+  clearActorTraining,
   createActorQqConversation,
   deleteActorQqConversation,
   getActorConversation,
@@ -53,6 +58,7 @@ import {
   saveActorQqConfig,
   saveActorWebSearchConfig,
   syncActorQqConnectionStatus,
+  startActorTraining,
   updateActorQqEnabled,
   updateActorActivity,
 } from "@/transport/dashboard";
@@ -75,6 +81,7 @@ import type {
   ActorRuntimeTransition,
   ActorSettingsSnapshot,
   ActorSummary,
+  ActorTrainingUiState,
   ActorWebSearchConfig,
 } from "@/types/dashboard/v1beta1";
 
@@ -387,6 +394,28 @@ function actorAvatarText(name: string) {
   }
 
   return Array.from(name.trim()).slice(0, 2).join("").toUpperCase() || "A";
+}
+
+function formatTrainingPercent(progress: number) {
+  return `${Math.round(Math.min(1, Math.max(0, progress)) * 100)}%`;
+}
+
+function formatTrainingRemaining(ms: number) {
+  if (ms <= 0) {
+    return "即将完成";
+  }
+  const totalSeconds = Math.ceil(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes <= 0) {
+    return `${seconds} 秒`;
+  }
+  if (minutes >= 60) {
+    const hours = Math.floor(minutes / 60);
+    const remainingMinutes = minutes % 60;
+    return `${hours} 小时 ${remainingMinutes} 分`;
+  }
+  return `${minutes} 分 ${String(seconds).padStart(2, "0")} 秒`;
 }
 
 function areLlmSettingsEqual(left: LlmSettingsDraft, right: LlmSettingsDraft) {
@@ -831,6 +860,7 @@ export function ActorSettingsPanel({
   showStartupTip = false,
   onStartupTipDismiss,
   onActorRuntimeChange,
+  onActorTrainingChange,
 }: {
   actor: ActorSummary;
   showStartupTip?: boolean;
@@ -839,6 +869,10 @@ export function ActorSettingsPanel({
     actorId: string,
     status: ActorRuntimeStatus,
     transition: ActorRuntimeTransition,
+  ) => void;
+  onActorTrainingChange: (
+    actorId: string,
+    training: ActorTrainingUiState | null,
   ) => void;
 }) {
   const actorId = actor.id;
@@ -851,6 +885,8 @@ export function ActorSettingsPanel({
   const [activitySwitching, setActivitySwitching] = useState(false);
   const [activityDisableDialogVisible, setActivityDisableDialogVisible] =
     useState(false);
+  const [trainingDetailVisible, setTrainingDetailVisible] = useState(false);
+  const [trainingStarting, setTrainingStarting] = useState(false);
   const [detailTitle, setDetailTitle] = useState<string | null>(null);
   const [detailClosing, setDetailClosing] = useState(false);
   const [loadedSettings, setLoadedSettings] = useState<{
@@ -1035,15 +1071,24 @@ export function ActorSettingsPanel({
     conversationDraft,
     savedConversationSettings,
   );
+  const training = actor.training;
+  const trainingPending = training?.status === "pending";
+  const trainingRunning = training?.status === "running";
+  const settingsLocked = trainingRunning;
   const activityTransitioning =
     activitySwitching || activityTransition !== null;
+  const activityActionDisabled =
+    activityTransitioning || trainingPending || trainingRunning;
   const activityEnabled =
     activityStatus !== "offline" ||
     activityTransition === "booting" ||
     activityTransition === "shutting_down";
-  const activityDescription = activityTransition
-    ? activityTransitionDescription[activityTransition]
-    : activityStatusDescription[activityStatus];
+  const activityDescription =
+    trainingPending || trainingRunning
+      ? "学习完成后即可启动"
+      : activityTransition
+        ? activityTransitionDescription[activityTransition]
+        : activityStatusDescription[activityStatus];
   const activityButtonLabel = activityTransition
     ? activityTransitionLabel[activityTransition]
     : activityStatus === "offline"
@@ -1176,7 +1221,7 @@ export function ActorSettingsPanel({
   }
 
   async function toggleActorActivity() {
-    if (activityTransitioning) {
+    if (activityActionDisabled) {
       return;
     }
 
@@ -1336,6 +1381,9 @@ export function ActorSettingsPanel({
   }
 
   function openDetail(title: string) {
+    if (settingsLocked) {
+      return;
+    }
     if (closeTimerRef.current !== null) {
       clearTimeout(closeTimerRef.current);
       closeTimerRef.current = null;
@@ -1343,6 +1391,35 @@ export function ActorSettingsPanel({
 
     setDetailTitle(title);
     setDetailClosing(false);
+  }
+
+  async function handleStartTraining() {
+    if (!trainingPending || trainingStarting) {
+      return;
+    }
+    setTrainingStarting(true);
+    try {
+      const response = await startActorTraining(actorId);
+      if (response.actor.training) {
+        onActorTrainingChange(actorId, response.actor.training);
+      }
+      setTrainingDetailVisible(true);
+    } catch {
+      showSettingsToast("开始学习失败", "error");
+    } finally {
+      setTrainingStarting(false);
+    }
+  }
+
+  function handleCloseTrainingDetail() {
+    setTrainingDetailVisible(false);
+    if (training?.status !== "completed") {
+      return;
+    }
+    onActorTrainingChange(actorId, null);
+    void clearActorTraining(actorId).catch(() => {
+      // The local completed card is already dismissed; server cleanup is best-effort.
+    });
   }
 
   function closeDetail() {
@@ -2009,6 +2086,7 @@ export function ActorSettingsPanel({
                   <button
                     type="button"
                     aria-label="关闭提示"
+                    disabled={settingsLocked}
                     onClick={onStartupTipDismiss}
                   >
                     <X aria-hidden="true" />
@@ -2022,9 +2100,9 @@ export function ActorSettingsPanel({
               role="switch"
               aria-checked={activityEnabled}
               aria-label={activityButtonLabel}
-              disabled={activityTransitioning}
+              disabled={activityActionDisabled}
               onClick={() => {
-                if (activityTransitioning) {
+                if (activityActionDisabled) {
                   return;
                 }
 
@@ -2060,9 +2138,25 @@ export function ActorSettingsPanel({
               </span>
             </button>
 
+            {training ? (
+              training.status === "pending" ? (
+                <ActorTrainingStartCard
+                  training={training}
+                  starting={trainingStarting}
+                  onStart={() => void handleStartTraining()}
+                />
+              ) : (
+                <ActorTrainingProgressCard
+                  training={training}
+                  onOpen={() => setTrainingDetailVisible(true)}
+                />
+              )
+            ) : null}
+
             <button
               type="button"
               className={styles.actorSettingsMenuItem}
+              disabled={settingsLocked}
               onClick={() => openDetail("当前会话信息")}
             >
               <span className={styles.actorSettingsMenuIcon}>
@@ -2134,6 +2228,7 @@ export function ActorSettingsPanel({
                         ? styles.actorSettingsMenuButton
                         : ""
                     }`}
+                    disabled={settingsLocked}
                     onClick={() => {
                       if (item.type === "menu") {
                         openDetail(item.label);
@@ -2274,6 +2369,13 @@ export function ActorSettingsPanel({
         </div>
       ) : null}
 
+      {trainingDetailVisible && training ? (
+        <ActorTrainingDetailOverlay
+          training={training}
+          onClose={handleCloseTrainingDetail}
+        />
+      ) : null}
+
       {settingsToast ? (
         <div
           key={settingsToast.id}
@@ -2294,6 +2396,183 @@ export function ActorSettingsPanel({
         </div>
       ) : null}
     </div>
+  );
+}
+
+function ActorTrainingStartCard({
+  training,
+  starting,
+  onStart,
+}: {
+  training: NonNullable<ActorSummary["training"]>;
+  starting: boolean;
+  onStart: () => void;
+}) {
+  return (
+    <div className={styles.actorTrainingCard}>
+      <span className={styles.actorTrainingCardIcon} aria-hidden="true">
+        <GraduationCap />
+      </span>
+      <span className={styles.actorTrainingCardBody}>
+        <span className={styles.actorTrainingCardTitle}>
+          等待学习
+          <strong>{training.totalMessages} 条</strong>
+        </span>
+        <span className={styles.actorTrainingCardMeta}>开始前请先配置 LLM</span>
+        <button
+          type="button"
+          className={styles.actorTrainingStartButton}
+          disabled={starting}
+          onClick={onStart}
+        >
+          {starting ? "开始中" : "开始学习"}
+        </button>
+      </span>
+    </div>
+  );
+}
+
+function ActorTrainingProgressCard({
+  training,
+  onOpen,
+}: {
+  training: NonNullable<ActorSummary["training"]>;
+  onOpen: () => void;
+}) {
+  const progressLabel = formatTrainingPercent(training.progress);
+  const running = training.status === "running";
+  const failed = training.status === "failed";
+  const remainingLabel =
+    running && training.estimatedRemainingMs === null
+      ? "计算中"
+      : formatTrainingRemaining(training.estimatedRemainingMs ?? 0);
+
+  return (
+    <button type="button" className={styles.actorTrainingCard} onClick={onOpen}>
+      <span
+        className={styles.actorTrainingCardIcon}
+        data-running={running ? "true" : undefined}
+        aria-hidden="true"
+      >
+        {running ? <LoaderCircle /> : <GraduationCap />}
+      </span>
+      <span className={styles.actorTrainingCardBody}>
+        <span className={styles.actorTrainingCardTitle}>
+          {failed ? "学习失败" : running ? "学习中" : "学习完成"}
+          <strong>{progressLabel}</strong>
+        </span>
+        <span className={styles.actorTrainingCardMeta}>
+          {training.characterName} · {training.processedMessages}/
+          {training.totalMessages} 条
+        </span>
+        <span className={styles.actorTrainingProgressTrack} aria-hidden="true">
+          <span style={{ width: progressLabel }} />
+        </span>
+        <span className={styles.actorTrainingCardEta}>
+          {failed
+            ? "请检查学习日志"
+            : running
+              ? `预计剩余 ${remainingLabel}`
+              : "可以启动角色"}
+        </span>
+      </span>
+    </button>
+  );
+}
+
+function ActorTrainingDetailOverlay({
+  training,
+  onClose,
+}: {
+  training: NonNullable<ActorSummary["training"]>;
+  onClose: () => void;
+}) {
+  const progressLabel = formatTrainingPercent(training.progress);
+  const running = training.status === "running";
+  const failed = training.status === "failed";
+
+  if (typeof document === "undefined") {
+    return null;
+  }
+
+  return createPortal(
+    <div
+      className={styles.actorTrainingOverlay}
+      role="dialog"
+      aria-modal="true"
+    >
+      <div className={styles.actorTrainingDialog}>
+        <header className={styles.actorTrainingDialogHeader}>
+          <span className={styles.actorTrainingDialogIcon} aria-hidden="true">
+            <Terminal />
+          </span>
+          <div>
+            <h3>{failed ? "学习失败" : running ? "学习进行中" : "学习完成"}</h3>
+            <p>{training.characterName}</p>
+          </div>
+          <button
+            type="button"
+            className={styles.actorTrainingDialogClose}
+            aria-label="关闭学习详情"
+            onClick={onClose}
+          >
+            <X aria-hidden="true" />
+          </button>
+        </header>
+
+        <section className={styles.actorTrainingDialogStats}>
+          <span>
+            <GraduationCap aria-hidden="true" />
+            {training.processedMessages}/{training.totalMessages}
+          </span>
+          <span>
+            <Clock3 aria-hidden="true" />
+            {failed
+              ? "失败"
+              : running
+                ? training.estimatedRemainingMs === null
+                  ? "计算中"
+                  : formatTrainingRemaining(training.estimatedRemainingMs)
+                : "已完成"}
+          </span>
+          <span>{progressLabel}</span>
+        </section>
+
+        <div className={styles.actorTrainingDialogProgress}>
+          <span style={{ width: progressLabel }} />
+        </div>
+
+        <dl className={styles.actorTrainingDialogMeta}>
+          <div>
+            <dt>回放数据</dt>
+            <dd>{training.sourceFileName ?? "未命名 JSON"}</dd>
+          </div>
+          <div>
+            <dt>描述</dt>
+            <dd>{training.description}</dd>
+          </div>
+          <div>
+            <dt>时间范围</dt>
+            <dd>
+              {training.startTime} ~ {training.endTime}
+            </dd>
+          </div>
+          <div>
+            <dt>天数</dt>
+            <dd>{training.dayCount}</dd>
+          </div>
+        </dl>
+
+        <div className={styles.actorTrainingTerminal}>
+          {training.logs.map((line, index) => (
+            <div key={`${index}-${line}`}>
+              <code>{line}</code>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>,
+    document.body,
   );
 }
 

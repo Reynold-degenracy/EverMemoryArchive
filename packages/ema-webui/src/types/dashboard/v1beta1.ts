@@ -45,6 +45,30 @@ export interface ActorSettingsSnapshot {
   qq?: ActorQQConfig;
 }
 
+export type ActorTrainingStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed";
+
+export interface ActorTrainingUiState {
+  status: ActorTrainingStatus;
+  characterName: string;
+  description: string;
+  sourceFileName?: string;
+  errorMessage?: string;
+  totalMessages: number;
+  processedMessages: number;
+  dayCount: number;
+  startTime: string;
+  endTime: string;
+  progress: number;
+  startedAt: number;
+  updatedAt: number;
+  estimatedRemainingMs: number | null;
+  logs: string[];
+}
+
 export interface ActorSummary {
   id: string;
   name: string;
@@ -59,6 +83,7 @@ export interface ActorSummary {
     time: number;
   };
   settings?: ActorSettingsSnapshot;
+  training?: ActorTrainingUiState;
 }
 
 export interface ActorActivityState {
@@ -159,11 +184,40 @@ export interface CreateActorRequest {
     startMinutes: number;
     endMinutes: number;
   };
+  training?: CreateActorTrainingRequest;
 }
 
 export interface CreateActorResponse {
   apiVersion: "v1beta1";
   actor: ActorSummary;
+}
+
+export interface ActorTrainingStartResponse {
+  apiVersion: "v1beta1";
+  actor: ActorSummary;
+}
+
+export interface ActorTrainingClearResponse {
+  apiVersion: "v1beta1";
+  ok: boolean;
+  actorId: string;
+}
+
+export interface CreateActorTrainingMessage {
+  name: string;
+  time: string;
+  content: string;
+}
+
+export interface CreateActorTrainingDataset {
+  description: string;
+  inputs: CreateActorTrainingMessage[];
+}
+
+export interface CreateActorTrainingRequest {
+  characterName: string;
+  sourceFileName?: string;
+  dataset: CreateActorTrainingDataset;
 }
 
 /** Actor-scoped LLM config DTO mirrored from EMA's runtime LLMConfig. */
