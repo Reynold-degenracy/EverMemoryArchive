@@ -211,9 +211,20 @@ export interface ActorEntity extends Entity {
    */
   trainingUpdatedAt?: DbDate;
   /**
+   * The date and time the actor was marked as deleted.
+   */
+  deletedAt?: DbDate;
+  /**
    * The date and time the actor was last updated
    */
   updatedAt?: DbDate;
+}
+
+export interface ActorReadOptions {
+  /**
+   * Include actors marked as deleted.
+   */
+  includeDeleted?: boolean;
 }
 
 /**
@@ -224,14 +235,14 @@ export interface ActorDB {
    * lists actors in the database
    * @returns Promise resolving to an array of actor data
    */
-  listActors(): Promise<ActorEntity[]>;
+  listActors(options?: ActorReadOptions): Promise<ActorEntity[]>;
 
   /**
    * gets an actor by id
    * @param id - The unique identifier for the actor
    * @returns Promise resolving to the actor data or null if not found
    */
-  getActor(id: number): Promise<ActorEntity | null>;
+  getActor(id: number, options?: ActorReadOptions): Promise<ActorEntity | null>;
 
   /**
    * inserts or updates an actor in the database
@@ -248,11 +259,12 @@ export interface ActorDB {
   clearActorLlmConfig(id: number): Promise<boolean>;
 
   /**
-   * deletes an actor from the database
+   * marks an actor as deleted
    * @param id - The unique identifier for the actor to delete
+   * @param deletedAt - Deletion timestamp to persist
    * @returns Promise resolving to true if deleted, false if not found
    */
-  deleteActor(id: number): Promise<boolean>;
+  deleteActor(id: number, deletedAt?: DbDate): Promise<boolean>;
 }
 
 /**
@@ -349,6 +361,12 @@ export interface UserOwnActorDB {
    * @returns Promise resolving when the operation completes
    */
   removeActorFromUser(entity: UserOwnActorRelation): Promise<boolean>;
+  /**
+   * Removes all user ownership relations for an actor.
+   * @param actorId - The actor ID to remove relations for
+   * @returns Promise resolving to the number of removed relations
+   */
+  removeActorRelationsByActorId(actorId: number): Promise<number>;
 }
 
 export interface ListUserOwnActorRelationsRequest {
@@ -521,6 +539,12 @@ export interface ConversationDB {
    * @returns Promise resolving to true if deleted, false if not found
    */
   deleteConversation(id: number): Promise<boolean>;
+  /**
+   * Deletes all conversations owned by an actor.
+   * @param actorId - The actor ID to delete conversations for
+   * @returns Promise resolving to the number of deleted conversations
+   */
+  deleteConversationsByActorId(actorId: number): Promise<number>;
 }
 
 export interface ListConversationsRequest {
@@ -702,6 +726,20 @@ export interface ConversationMessageDB {
    * @returns Promise resolving to true if deleted, false if not found
    */
   deleteConversationMessage(id: number): Promise<boolean>;
+  /**
+   * Deletes all conversation messages owned by an actor.
+   * @param actorId - The actor ID to delete messages for
+   * @returns Promise resolving to the number of deleted messages
+   */
+  deleteConversationMessagesByActorId(actorId: number): Promise<number>;
+  /**
+   * Deletes all messages in a conversation.
+   * @param conversationId - The conversation ID to delete messages for
+   * @returns Promise resolving to the number of deleted messages
+   */
+  deleteConversationMessagesByConversationId(
+    conversationId: number,
+  ): Promise<number>;
 }
 
 export interface ListConversationMessagesRequest {
@@ -804,6 +842,12 @@ export interface ShortTermMemoryDB {
    * @returns Promise resolving to true if deleted, false if not found.
    */
   deleteShortTermMemory(id: number): Promise<boolean>;
+  /**
+   * Deletes all short-term memories owned by an actor.
+   * @param actorId - The actor ID to delete memories for.
+   * @returns Promise resolving to the number of deleted memories.
+   */
+  deleteShortTermMemoriesByActorId(actorId: number): Promise<number>;
 }
 
 export interface ListShortTermMemoriesRequest {
@@ -898,6 +942,12 @@ export interface LongTermMemoryStore {
    * @returns Promise resolving to true if deleted, false if not found
    */
   deleteLongTermMemory(id: number): Promise<boolean>;
+  /**
+   * Deletes all long term memories owned by an actor.
+   * @param actorId - The actor ID to delete memories for
+   * @returns Promise resolving to the number of deleted memories
+   */
+  deleteLongTermMemoriesByActorId(actorId: number): Promise<number>;
 }
 
 /**

@@ -277,6 +277,87 @@ export class LanceMemoryVectorIndex extends MongoMemorySearchAdaptor {
     return { ...this.status };
   }
 
+  async deleteLongTermMemory(id: number): Promise<void> {
+    const deletedFromActiveTable = await this.hasActiveTableMemory(id);
+    const tableNames = await this.lancedb.tableNames();
+    await Promise.all(
+      tableNames
+        .filter((tableName) => tableName.startsWith("long_term_memories_"))
+        .map(async (tableName) => {
+          const table =
+            this.active?.tableName === tableName && this.indexTable
+              ? this.indexTable
+              : await this.lancedb.openTable(tableName);
+          await table.delete(`id = ${id}`);
+        }),
+    );
+    if (deletedFromActiveTable && this.status.totalMemories !== undefined) {
+      this.status = {
+        ...this.status,
+        totalMemories: Math.max(0, this.status.totalMemories - 1),
+        indexedMemories:
+          this.status.indexedMemories !== undefined
+            ? Math.max(0, this.status.indexedMemories - 1)
+            : this.status.indexedMemories,
+      };
+    }
+  }
+
+  async deleteLongTermMemoriesByActorId(actorId: number): Promise<void> {
+    if (typeof actorId !== "number") {
+      throw new Error("actorId must be a number");
+    }
+    const deletedFromActiveTable =
+      await this.countActiveTableActorMemories(actorId);
+    const tableNames = await this.lancedb.tableNames();
+    await Promise.all(
+      tableNames
+        .filter((tableName) => tableName.startsWith("long_term_memories_"))
+        .map(async (tableName) => {
+          const table =
+            this.active?.tableName === tableName && this.indexTable
+              ? this.indexTable
+              : await this.lancedb.openTable(tableName);
+          await table.delete(`actor_id = ${actorId}`);
+        }),
+    );
+    if (deletedFromActiveTable > 0 && this.status.totalMemories !== undefined) {
+      this.status = {
+        ...this.status,
+        totalMemories: Math.max(
+          0,
+          this.status.totalMemories - deletedFromActiveTable,
+        ),
+        indexedMemories:
+          this.status.indexedMemories !== undefined
+            ? Math.max(0, this.status.indexedMemories - deletedFromActiveTable)
+            : this.status.indexedMemories,
+      };
+    }
+  }
+
+  private async hasActiveTableMemory(id: number): Promise<boolean> {
+    if (!this.indexTable) {
+      return false;
+    }
+    const rows = (await this.indexTable
+      .query()
+      .where(`id = ${id}`)
+      .select(["id"])
+      .limit(1)
+      .toArray()) as Array<{ id: number | bigint }>;
+    return rows.length > 0;
+  }
+
+  private async countActiveTableActorMemories(
+    actorId: number,
+  ): Promise<number> {
+    if (!this.indexTable) {
+      return 0;
+    }
+    return await this.indexTable.countRows(`actor_id = ${actorId}`);
+  }
+
   private async openOrCreateTable(
     tableName: string,
     dimensions: number,
