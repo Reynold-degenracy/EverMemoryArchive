@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 
-import type { Message } from "../shared/schema";
+import type { Message } from "../llm/schema";
 import type { Tool, ToolContext } from "../tools/base";
 import type { EmaReply } from "../tools/ema_reply_tool";
 
@@ -58,6 +58,8 @@ export type AgentEventsEmitter = EventEmitter<AgentEventMap> & AgentEventSource;
 
 /** The state of the agent. */
 export type AgentState = {
+  /** Trace identifier used by the LLM tracer for this agent run. */
+  traceId?: string;
   systemPrompt: string;
   messages: Message[];
   tools: Tool[];

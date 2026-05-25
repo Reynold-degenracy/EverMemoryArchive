@@ -1,9 +1,8 @@
 import { EventEmitter } from "node:events";
-import { GlobalConfig } from "../config/index";
 import { Agent, AgentEventNames, checkCompleteMessages } from "../agent";
 import type { AgentEventName, AgentState } from "../agent";
 import type { Server } from "../server";
-import { formatLogTimestamp, Logger } from "../shared/logger";
+import { formatTraceTimestamp, Logger } from "../shared/logger";
 import { LLMClient } from "../llm";
 import { baseTools } from "../tools";
 import { resolveSession } from "../channel";
@@ -42,7 +41,7 @@ export class ActorWorker {
     logger: Logger,
   ) {
     this.logger = logger;
-    this.agent = new Agent(GlobalConfig.agent, llm, this.logger);
+    this.agent = new Agent(llm);
     this.bindAgentEvent();
     this.logger.info("Actor chat worker created");
   }
@@ -71,10 +70,8 @@ export class ActorWorker {
     const llm = new LLMClient(
       await server.dbService.getActorLLMConfig(actorId),
     );
-    const startedAt = formatLogTimestamp();
-    const date = startedAt.slice(0, 10);
     const logger = Logger.create({
-      name: "agent.chat",
+      name: "actor.worker",
       context: {
         actorId,
         conversationId,
@@ -82,11 +79,7 @@ export class ActorWorker {
       },
       outputs: [
         { type: "console", level: "warn" },
-        {
-          type: "file",
-          level: "debug",
-          filePath: `actors/actor_${actorId}/chat/${date}/${startedAt}.jsonl`,
-        },
+        { type: "file", level: "warn" },
       ],
     });
     return new ActorWorker(
@@ -244,9 +237,7 @@ export class ActorWorker {
           }
           if (
             last.role === "user" &&
-            last.contents.some(
-              (content) => content.type === "function_response",
-            )
+            last.contents.some((content) => content.type === "tool_result")
           ) {
             const time = formatTimestamp("YYYY-MM-DD HH:mm:ss", Date.now());
             messages.push({
@@ -269,6 +260,7 @@ export class ActorWorker {
           await this.markInputMessagesBuffered(batches);
         } else {
           this.agentState = {
+            traceId: this.buildTraceId(),
             systemPrompt:
               await this.server.memoryManager.buildSystemPromptForChat(
                 this.actorId,
@@ -328,6 +320,12 @@ export class ActorWorker {
     }
     await this.agent.abort();
     await this.currentRunPromise;
+  }
+
+  private buildTraceId(timestamp: number = Date.now()): string {
+    const startedAt = formatTraceTimestamp(timestamp);
+    const date = startedAt.slice(0, 10);
+    return `actors/actor_${this.actorId}/chat/${this.conversationId}/${date}/${startedAt}`;
   }
 
   private async markInputMessagesBuffered(

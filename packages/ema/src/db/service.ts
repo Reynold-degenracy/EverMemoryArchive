@@ -5,7 +5,10 @@ import { BSON } from "mongodb";
 
 import {
   cloneConfig,
+  DEFAULT_CHANNEL_CONFIG,
+  DEFAULT_WEB_SEARCH_CONFIG,
   GlobalConfig,
+  normalizeLLMConfig,
   type ChannelConfig,
   type LLMConfig,
   type WebSearchConfig,
@@ -46,11 +49,7 @@ import {
 const DEFAULT_WEB_USER_ID = 1;
 
 export function getLanceDbDirectory(): string {
-  return path.join(
-    GlobalConfig.system.dataRoot,
-    "lancedb",
-    GlobalConfig.system.mode,
-  );
+  return path.join(GlobalConfig.paths.dataRoot, "lancedb");
 }
 
 export async function prepareLanceDbDirectory(): Promise<{
@@ -58,12 +57,8 @@ export async function prepareLanceDbDirectory(): Promise<{
   reset: boolean;
 }> {
   const directory = getLanceDbDirectory();
-  const reset = GlobalConfig.system.mode === "dev";
-  if (reset) {
-    await nodeFs.rm(directory, { recursive: true, force: true });
-  }
   await nodeFs.mkdir(directory, { recursive: true });
-  return { directory, reset };
+  return { directory, reset: false };
 }
 
 /**
@@ -315,7 +310,9 @@ export class DBService {
     if (!actor) {
       throw new Error(`Actor ${actorId} not found.`);
     }
-    return cloneConfig(actor.llmConfig ?? GlobalConfig.defaultLlm);
+    return cloneConfig(
+      normalizeLLMConfig(actor.llmConfig ?? GlobalConfig.defaultLlm),
+    );
   }
 
   /**
@@ -328,7 +325,7 @@ export class DBService {
     if (!actor) {
       throw new Error(`Actor ${actorId} not found.`);
     }
-    return cloneConfig(actor.webSearchConfig ?? GlobalConfig.defaultWebSearch);
+    return cloneConfig(actor.webSearchConfig ?? DEFAULT_WEB_SEARCH_CONFIG);
   }
 
   /**
@@ -341,7 +338,7 @@ export class DBService {
     if (!actor) {
       throw new Error(`Actor ${actorId} not found.`);
     }
-    return cloneConfig(actor.channelConfig ?? GlobalConfig.defaultChannel);
+    return cloneConfig(actor.channelConfig ?? DEFAULT_CHANNEL_CONFIG);
   }
 
   private snapshotPath(name: string): string {
@@ -351,7 +348,7 @@ export class DBService {
       );
     }
     return path.join(
-      GlobalConfig.system.dataRoot,
+      GlobalConfig.paths.dataRoot,
       "mongo-snapshots",
       `${name}.json`,
     );

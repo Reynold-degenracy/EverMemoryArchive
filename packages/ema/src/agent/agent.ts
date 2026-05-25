@@ -1,25 +1,18 @@
 import { EventEmitter } from "node:events";
 
 import type { LLMClient } from "../llm";
-import {
-  DEFAULT_AGENT_MAX_STEPS,
-  DEFAULT_AGENT_TOKEN_LIMIT,
-  type AgentConfig,
-} from "../config/index";
-import { Logger } from "../shared/logger";
 import { RetryExhaustedError, isAbortError } from "../llm/retry";
-import type {
-  LLMResponse,
-  Message,
-  Content,
-  FunctionResponse,
-} from "../shared/schema";
-import type { Tool, ToolResult } from "../tools/base";
+import { Logger } from "../shared/logger";
+import type { Content, Message, ModelMessage, ToolResult } from "../llm/schema";
+import { isToolCall } from "../llm/utils";
+import type { Tool, ToolExecutionResult } from "../tools/base";
 import type {
   AgentEventsEmitter,
   AgentState,
   AgentStateCallback,
 } from "./base";
+
+const AGENT_MAX_STEPS = 50;
 
 /**
  * Reports whether the message history represents a complete model response.
@@ -33,7 +26,7 @@ export function checkCompleteMessages(messages: Message[]): boolean {
   const last = messages[messages.length - 1];
   return (
     last.role === "model" &&
-    !last.contents.some((content) => content.type === "function_call")
+    !last.contents.some((content) => isToolCall(content))
   );
 }
 
@@ -53,7 +46,6 @@ export class ContextManager {
     llmClient: LLMClient,
     events: AgentEventsEmitter,
     logger: Logger,
-    tokenLimit: number = 80000,
   ) {
     this.llmClient = llmClient;
     this.events = events;
@@ -90,12 +82,12 @@ export class ContextManager {
   }
 
   /** Add an model message to context. */
-  addModelMessage(response: LLMResponse): void {
-    this.messages.push(response.message);
+  addModelMessage(message: ModelMessage): void {
+    this.messages.push(message);
   }
 
   /** Add a tool result message to context. */
-  addToolMessage(contents: FunctionResponse[]): void {
+  addToolMessage(contents: ToolResult[]): void {
     this.messages.push({ role: "user", contents: contents });
   }
 
@@ -117,7 +109,7 @@ export class Agent {
     name: "agent",
     outputs: [
       { type: "console", level: "warn" },
-      { type: "file", level: "debug" },
+      { type: "file", level: "warn" },
     ],
   });
   private status: "idle" | "running" = "idle";
@@ -125,8 +117,6 @@ export class Agent {
   private abortRequested = false;
 
   constructor(
-    /** Configuration for the agent. */
-    private config: AgentConfig,
     /** LLM client used by the agent to generate responses. */
     private llm: LLMClient,
     /** Outside Logger used by the agent. */
@@ -140,7 +130,6 @@ export class Agent {
       this.llm,
       this.events,
       this.logger,
-      DEFAULT_AGENT_TOKEN_LIMIT,
     );
   }
 
@@ -186,88 +175,33 @@ export class Agent {
   /** Execute agent loop until task is complete or max steps reached. */
   async mainLoop(): Promise<void> {
     const toolDict = new Map(this.contextManager.tools.map((t) => [t.name, t]));
-    const maxSteps = DEFAULT_AGENT_MAX_STEPS;
+    const maxSteps = AGENT_MAX_STEPS;
     let step = 0;
-
-    this.logger.info("Agent run started", {
-      maxSteps,
-      messageCount: this.contextManager.messages.length,
-      toolNames: this.contextManager.tools.map((tool) => tool.name),
-    });
-    this.logger.debug("Agent system prompt prepared", {
-      systemPrompt: this.contextManager.systemPrompt,
-    });
-    this.logger.debug(
-      `request ${this.contextManager.messages.length} messages`,
-      this.contextManager.messages,
-    );
+    const traceId = this.contextManager.state.traceId;
 
     while (step < maxSteps) {
-      if (this.abortRequested) {
-        this.finishAborted();
-        return;
-      }
-      this.logger.debug(`Step ${step + 1}/${maxSteps}`);
-
       // Call LLM with context from context manager
-      let response: LLMResponse;
+      let response: ModelMessage;
       try {
+        this.throwAbortIfRequested();
         this.llm.setRetryCallback((exception, attempt) => {
           this.logger.warn("LLM request retry", {
+            traceId,
             step: step + 1,
             attempt,
             error: exception,
           });
         });
-        const startedAt = Date.now();
-        this.logger.debug("LLM request", {
-          step: step + 1,
-          systemPrompt: this.contextManager.systemPrompt,
+        response = await this.llm.generate({
           messages: this.contextManager.messages,
-          tools: this.contextManager.tools.map((tool) => ({
-            name: tool.name,
-            description: tool.description,
-            parameters: tool.parameters,
-          })),
+          tools: this.contextManager.tools,
+          systemPrompt: this.contextManager.systemPrompt,
+          traceId,
+          signal: this.abortController?.signal,
         });
-        response = await this.llm.generate(
-          this.contextManager.messages,
-          this.contextManager.tools,
-          this.contextManager.systemPrompt,
-          this.abortController?.signal,
-        );
-        this.logger.debug(`LLM response received.`, {
-          step: step + 1,
-          durationMs: Date.now() - startedAt,
-          response,
-        });
+        this.throwAbortIfRequested();
       } catch (error) {
-        if (isAbortError(error)) {
-          this.finishAborted();
-          return;
-        }
-        if (error instanceof RetryExhaustedError) {
-          const errorMsg = `LLM call failed after ${error.attempts} retries. Last error: ${String(error.lastException)}`;
-          this.events.emit("runFinished", {
-            ok: false,
-            msg: errorMsg,
-            error: error as RetryExhaustedError,
-          });
-          this.logger.error(errorMsg);
-          return;
-        }
-        const errorMsg = `LLM call failed: ${(error as Error).message}`;
-        this.events.emit("runFinished", {
-          ok: false,
-          msg: errorMsg,
-          error: error as Error,
-        });
-        this.logger.error(errorMsg);
-        return;
-      }
-
-      if (this.abortRequested) {
-        this.finishAborted();
+        this.handleGenerateError(error, traceId, step + 1);
         return;
       }
 
@@ -276,55 +210,50 @@ export class Agent {
 
       // Check if task is complete (no tool calls)
       if (checkCompleteMessages(this.contextManager.messages)) {
+        const finishReason = response.metadata?.finishReason ?? "UNKNOWN";
         this.events.emit("runFinished", {
           ok: true,
-          msg: response.finishReason,
+          msg: finishReason,
         });
-        this.logger.debug(`Run finished: ${response.finishReason}`);
         return;
       }
 
       // Execute tool calls
       // The loop cannot be interrupted during the process.
-      const functionCalls = response.message.contents.filter(
-        (content) => content.type === "function_call",
-      );
-      const functionResponses: FunctionResponse[] = [];
-      for (const functionCall of functionCalls) {
-        const toolCallId = functionCall.id;
-        const functionName = functionCall.name;
-        const callArgs = functionCall.args;
+      const toolCalls = response.contents.filter(isToolCall);
+      const toolResults: ToolResult[] = [];
+      for (const toolCall of toolCalls) {
+        const toolCallId = toolCall.toolCallId;
+        const toolName = toolCall.name;
+        const callArgs = toolCall.arguments;
 
-        this.logger.debug(`Tool call [${functionName}]`, {
-          step: step + 1,
-          toolName: functionName,
-          args: callArgs,
-        });
-
-        if (functionCalls.length > 1) {
-          functionResponses.push({
-            type: "function_response",
-            id: toolCallId,
-            name: functionName,
+        if (toolCalls.length > 1) {
+          toolResults.push({
+            type: "tool_result",
+            toolCallId,
+            name: toolName,
             result: {
-              success: false,
-              error: `Don't call multiple functions parallely.`,
+              text: JSON.stringify({
+                success: false,
+                content: `Don't call multiple tools in parallel.`,
+              }),
             },
           });
           this.logger.warn(
-            `Multiple tool calls in a single response are not supported. Skipping tool [${functionName}].`,
+            `Multiple tool calls in a single response are not supported. Skipping tool [${toolName}].`,
+            { traceId, step: step + 1, toolName },
           );
           continue;
         }
 
         // Execute tool
-        let result: ToolResult;
-        const tool = toolDict.get(functionName);
+        let result: ToolExecutionResult;
+        const tool = toolDict.get(toolName);
         const toolStartedAt = Date.now();
         if (!tool) {
           result = {
             success: false,
-            error: `Unknown tool: ${functionName}`,
+            content: `Unknown tool: ${toolName}`,
           };
         } else {
           try {
@@ -337,51 +266,46 @@ export class Agent {
             const errorTrace = (err as Error).stack ?? "";
             result = {
               success: false,
-              error: `Tool execution failed: ${errorDetail}\n\nTraceback:\n${errorTrace}`,
+              content: `Tool execution failed: ${errorDetail}\n\nTraceback:\n${errorTrace}`,
             };
           }
         }
 
         // Log tool execution result
         if (result.success) {
-          if (functionName === "ema_reply" && result.success) {
+          if (toolName === "ema_reply" && result.content) {
             this.events.emit("emaReplyReceived", {
               reply: JSON.parse(result.content!),
             });
-            result.content = undefined;
+            const { content, ...rest } = result;
+            result = rest;
           }
-          this.logger.debug(`Tool [${functionName}] done.`, {
-            step: step + 1,
-            toolName: functionName,
-            durationMs: Date.now() - toolStartedAt,
-            result,
-          });
         } else {
-          this.logger.warn(`Tool [${functionName}] failed.`, {
+          this.logger.warn(`Tool [${toolName}] failed.`, {
+            traceId,
             step: step + 1,
-            toolName: functionName,
+            toolName,
             durationMs: Date.now() - toolStartedAt,
             result,
           });
         }
 
-        const functionResponseParts = result.parts;
-        if (functionResponseParts) {
-          result.parts = undefined;
-        }
+        const { images, ...textPayload } = result;
 
-        // Add function response to list
-        functionResponses.push({
-          type: "function_response",
-          id: toolCallId,
-          name: functionName,
-          result: result,
-          ...(functionResponseParts ? { parts: functionResponseParts } : {}),
+        // Add tool result to list
+        toolResults.push({
+          type: "tool_result",
+          toolCallId,
+          name: toolName,
+          result: {
+            text: JSON.stringify(textPayload),
+            ...(images?.length ? { images } : {}),
+          },
         });
       }
 
-      // Add all function responses to context
-      this.contextManager.addToolMessage(functionResponses);
+      // Add all tool results to context
+      this.contextManager.addToolMessage(toolResults);
 
       step += 1;
     }
@@ -393,13 +317,55 @@ export class Agent {
       msg: errorMsg,
       error: new Error(errorMsg),
     });
-    this.logger.error(errorMsg);
+    this.logger.error(errorMsg, { traceId, maxSteps });
     return;
+  }
+
+  private throwAbortIfRequested(): void {
+    if (!this.abortRequested) {
+      return;
+    }
+    const error = new Error("Aborted");
+    error.name = "AbortError";
+    throw error;
+  }
+
+  private handleGenerateError(
+    error: unknown,
+    traceId: string | undefined,
+    step: number,
+  ): void {
+    if (isAbortError(error)) {
+      this.finishAborted();
+      return;
+    }
+    if (error instanceof RetryExhaustedError) {
+      const errorMsg = `LLM call failed after ${error.attempts} retries. Last error: ${String(error.lastException)}`;
+      this.events.emit("runFinished", {
+        ok: false,
+        msg: errorMsg,
+        error,
+      });
+      this.logger.error(errorMsg, { traceId, step });
+      return;
+    }
+    const resolvedError =
+      error instanceof Error ? error : new Error(String(error));
+    const errorMsg = `LLM call failed: ${resolvedError.message}`;
+    this.events.emit("runFinished", {
+      ok: false,
+      msg: errorMsg,
+      error: resolvedError,
+    });
+    this.logger.error(errorMsg, {
+      traceId,
+      step,
+      error: resolvedError,
+    });
   }
 
   private finishAborted(): void {
     const error = new Error("Aborted");
-    this.logger.debug("Agent run aborted");
     this.events.emit("runFinished", {
       ok: false,
       msg: error.message,

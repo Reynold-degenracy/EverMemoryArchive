@@ -29,7 +29,7 @@ export type LoggerOutput =
       /** Minimum level emitted to this output. */
       level: LoggerLevel;
       /**
-       * File path relative to GlobalConfig.system.logsDir unless absolute.
+       * File path relative to GlobalConfig.paths.logsDir unless absolute.
        *
        * When omitted, the record is written to the process-wide server log:
        * logs/server/{date}/{startedAt}.jsonl.
@@ -406,7 +406,7 @@ function resolveLogFilePath(filePath: string, logsRoot: string): string {
 
 function getLogsRoot(): string {
   try {
-    return GlobalConfig.system.logsDir;
+    return GlobalConfig.paths.logsDir;
   } catch {
     return path.resolve(getWorkspaceRootFallback(), "logs");
   }
@@ -511,4 +511,14 @@ export function formatLogTimestamp(timestamp: number = Date.now()): string {
     ].join("-") +
     `-${pad(date.getMilliseconds(), 3)}`
   );
+}
+
+/**
+ * Formats a local timestamp for agent trace file names.
+ *
+ * This intentionally matches log timestamps while keeping the trace naming
+ * explicit at call sites.
+ */
+export function formatTraceTimestamp(timestamp: number = Date.now()): string {
+  return formatLogTimestamp(timestamp);
 }

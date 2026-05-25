@@ -66,6 +66,41 @@ describe("DBService", () => {
     });
   });
 
+  test("normalizes legacy actor LLM override when resolving runtime config", async () => {
+    await mongo
+      .getDb()
+      .collection("actors")
+      .insertOne({
+        id: 1,
+        roleId: 1,
+        enabled: true,
+        llmConfig: {
+          provider: "google",
+          openai: {
+            mode: "responses",
+            model: "gpt-5.5",
+            baseUrl: "https://api.openai.com/v1",
+            apiKey: "sk-legacy",
+          },
+          google: {
+            model: "gemini-3.1-pro-preview",
+            baseUrl: " https://generativelanguage.googleapis.com ",
+            apiKey: " gemini-key ",
+            useVertexAi: false,
+            project: "",
+            location: "",
+            credentialsFile: "",
+          },
+        },
+      });
+
+    await expect(dbService.getActorLLMConfig(1)).resolves.toEqual({
+      model: "gemini-3.1-pro-preview",
+      baseUrl: "https://generativelanguage.googleapis.com",
+      apiKey: "gemini-key",
+    });
+  });
+
   test("snapshots and restores managed collections", async () => {
     await dbService.roleDB.upsertRole({
       id: 1,
@@ -76,7 +111,7 @@ describe("DBService", () => {
     const result = await dbService.snapshot("db-service-snapshot");
     expect(result.fileName).toBe(
       path.join(
-        GlobalConfig.system.dataRoot,
+        GlobalConfig.paths.dataRoot,
         "mongo-snapshots",
         "db-service-snapshot.json",
       ),
@@ -109,7 +144,7 @@ describe("DBService LanceDB directory", () => {
     await nodeFs.rm(dataRoot, { recursive: true, force: true });
   });
 
-  test("uses a dev LanceDB directory and resets it before connecting", async () => {
+  test("uses the data root LanceDB directory without resetting in dev", async () => {
     await loadGlobalConfigForLanceTest("dev", dataRoot);
     const directory = getLanceDbDirectory();
     const sentinel = path.join(directory, "sentinel.txt");
@@ -119,13 +154,13 @@ describe("DBService LanceDB directory", () => {
     const result = await prepareLanceDbDirectory();
 
     expect(result).toEqual({
-      directory,
-      reset: true,
+      directory: path.join(dataRoot, "lancedb"),
+      reset: false,
     });
-    await expect(nodeFs.access(sentinel)).rejects.toThrow();
+    await expect(nodeFs.readFile(sentinel, "utf8")).resolves.toBe("stale");
   });
 
-  test("uses a prod LanceDB directory without resetting existing data", async () => {
+  test("uses the data root LanceDB directory without resetting in prod", async () => {
     await loadGlobalConfigForLanceTest("prod", dataRoot);
     const directory = getLanceDbDirectory();
     const sentinel = path.join(directory, "sentinel.txt");
@@ -135,7 +170,7 @@ describe("DBService LanceDB directory", () => {
     const result = await prepareLanceDbDirectory();
 
     expect(result).toEqual({
-      directory,
+      directory: path.join(dataRoot, "lancedb"),
       reset: false,
     });
     await expect(nodeFs.readFile(sentinel, "utf8")).resolves.toBe("keep");

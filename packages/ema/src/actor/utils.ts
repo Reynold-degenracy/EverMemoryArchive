@@ -1,4 +1,5 @@
-import { expandContentsForModel, type UserMessage } from "../shared/schema";
+import type { UserMessage } from "../llm/schema";
+import { expandContentsForModel } from "../llm/utils";
 import { formatTimestamp } from "../shared/utils";
 import { formatReplyRef } from "../channel";
 import type { ActorInput } from "./base";

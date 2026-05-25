@@ -6,7 +6,6 @@ import {
   useState,
   type CSSProperties,
   type ReactNode,
-  type TextareaHTMLAttributes,
 } from "react";
 import { Check, ChevronDown, LoaderCircle, X } from "lucide-react";
 import { useRouter } from "next/navigation";
@@ -17,13 +16,20 @@ import {
   embeddingDefaults,
   initialDraft,
   isStepComplete,
-  llmDefaults,
   setupSteps,
+  type LlmModelOption,
+  type LlmModelProvider,
+  type LlmThinkingLevel,
   type SetupDraft,
   type SetupServiceCheckResponse,
   type SetupStepId,
 } from "@/types/setup/v1beta1";
-import { commitSetup, runSetupCheck, runSetupDryRun } from "@/transport/setup";
+import {
+  commitSetup,
+  getSetupStatus,
+  runSetupCheck,
+  runSetupDryRun,
+} from "@/transport/setup";
 import {
   checkFeedbackFromResponse,
   dryRunFailureFeedback,
@@ -31,7 +37,6 @@ import {
   transportFailureFeedback,
   type CheckFeedback,
 } from "@/types/setup/feedback";
-import { getOwnerStatus } from "@/transport/auth";
 import {
   fieldLimits,
   getStepFieldPaths,
@@ -61,11 +66,10 @@ interface TestState {
   feedback: CheckFeedback | null;
 }
 
-const llmModelOptions: Record<SetupDraft["llm"]["provider"], string[]> = {
-  google: ["gemini-3.1-flash-lite-preview", "gemini-3.1-pro-preview"],
-  openai: [],
-  anthropic: [],
-};
+interface ModelSelectOption {
+  value: string;
+  group?: string;
+}
 
 const embeddingModelOptions: Record<
   SetupDraft["embedding"]["provider"],
@@ -75,24 +79,30 @@ const embeddingModelOptions: Record<
   openai: ["text-embedding-3-large"],
 };
 
-const apiKeyPlaceholders: Record<SetupDraft["llm"]["provider"], string> = {
-  google: "AIzaSyA7fK...D5eJ",
-  openai: "sk-u1Kv9xP...ZTyU",
-  anthropic: "sk-ant-9xW...G0hJ",
+const llmProviderLabels: Record<LlmModelProvider, string> = {
+  openai: "OpenAI",
+  google: "Google",
+  anthropic: "Anthropic",
+  zai: "Z.ai",
+  moonshot: "Moonshot",
+  qwen: "Qwen",
 };
 
-const vertexCredentialsJsonPlaceholder = String.raw`{
-  "type": "service_account",
-  "project_id": "your-project-id",
-  "private_key_id": "your-private-key-id",
-  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC...\n-----END PRIVATE KEY-----\n",
-  "client_email": "your-service-account@your-project-id.iam.gserviceaccount.com",
-  "client_id": "123456789012345678901",
-  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-  "token_uri": "https://oauth2.googleapis.com/token",
-  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/your-service-account%40your-project-id.iam.gserviceaccount.com"
-}`;
+const thinkingLevelLabels: Record<LlmThinkingLevel, string> = {
+  none: "关闭",
+  low: "低",
+  medium: "中",
+  high: "高",
+};
+
+const apiKeyPlaceholders: Record<LlmModelProvider, string> = {
+  google: "AIzaSyA7fK...D5eJ 或 Vertex AI 凭据 JSON",
+  openai: "sk-u1Kv9xP...ZTyU",
+  anthropic: "sk-ant-9xW...G0hJ",
+  zai: "zai_...",
+  moonshot: "sk-...",
+  qwen: "本地服务可填写任意占位值",
+};
 
 const accessTokenChars =
   "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
@@ -148,6 +158,54 @@ function testStateFromCheck(response: SetupServiceCheckResponse): TestState {
   };
 }
 
+function defaultThinkingLevel(option: LlmModelOption) {
+  if (option.capabilities.thinkingLevels.length === 0) {
+    return undefined;
+  }
+  if (
+    option.requestDefaults.thinkingLevel &&
+    option.capabilities.thinkingLevels.includes(
+      option.requestDefaults.thinkingLevel,
+    )
+  ) {
+    return option.requestDefaults.thinkingLevel;
+  }
+  return option.capabilities.thinkingLevels[0];
+}
+
+function normalizeThinkingLevel(
+  option: LlmModelOption,
+  value: LlmThinkingLevel | undefined,
+) {
+  if (option.capabilities.thinkingLevels.length === 0) {
+    return undefined;
+  }
+  return value && option.capabilities.thinkingLevels.includes(value)
+    ? value
+    : defaultThinkingLevel(option);
+}
+
+function llmDraftForModel(
+  option: LlmModelOption,
+  current: SetupDraft["llm"],
+): SetupDraft["llm"] {
+  return {
+    model: option.model,
+    baseUrl: option.defaultBaseUrl,
+    apiKey: current.apiKey,
+    thinkingLevel: normalizeThinkingLevel(option, current.thinkingLevel),
+  };
+}
+
+function buildLlmModelSelectOptions(
+  options: LlmModelOption[],
+): ModelSelectOption[] {
+  return options.map((option) => ({
+    value: option.model,
+    group: llmProviderLabels[option.provider],
+  }));
+}
+
 function Field({
   label,
   hint,
@@ -182,57 +240,18 @@ function Field({
   );
 }
 
-function ScrollablePlaceholderTextarea({
-  value,
-  placeholder,
-  rows = 5,
-  onChange,
-  ...textareaProps
-}: {
-  value: string;
-  placeholder: string;
-  rows?: number;
-  onChange: (value: string) => void;
-} & Omit<
-  TextareaHTMLAttributes<HTMLTextAreaElement>,
-  "value" | "placeholder" | "rows" | "onChange"
->) {
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-
-  return (
-    <div className={styles.scrollableTextareaShell}>
-      <textarea
-        ref={textareaRef}
-        value={value}
-        rows={rows}
-        {...textareaProps}
-        onChange={(event) => onChange(event.target.value)}
-      />
-      {!value ? (
-        <pre
-          className={styles.scrollableTextareaPlaceholder}
-          aria-hidden="true"
-          onMouseDown={() => {
-            window.requestAnimationFrame(() => textareaRef.current?.focus());
-          }}
-        >
-          {placeholder}
-        </pre>
-      ) : null}
-    </div>
-  );
-}
-
 function ModelSelect({
   value,
   options,
   error,
+  emptyLabel = "暂无可用模型",
   onChange,
   onBlur,
 }: {
   value: string;
-  options: string[];
+  options: ModelSelectOption[];
   error?: string | null;
+  emptyLabel?: string;
   onChange: (value: string) => void;
   onBlur: () => void;
 }) {
@@ -278,32 +297,53 @@ function ModelSelect({
           role="listbox"
           aria-label="选择模型"
         >
-          {options.map((model) => (
-            <button
-              key={model}
-              type="button"
+          {options.length > 0 ? (
+            options.map((option, index) => {
+              const showGroup =
+                option.group && option.group !== options[index - 1]?.group;
+              return (
+                <div
+                  key={option.value}
+                  className={styles.modelSelectGroup}
+                  role="presentation"
+                >
+                  {showGroup ? (
+                    <span className={styles.modelSelectGroupLabel}>
+                      {option.group}
+                    </span>
+                  ) : null}
+                  <button
+                    type="button"
+                    role="option"
+                    aria-selected={value === option.value}
+                    className={`${styles.modelSelectOption} ${
+                      value === option.value
+                        ? styles.modelSelectOptionActive
+                        : ""
+                    }`}
+                    onClick={() => {
+                      onChange(option.value);
+                      setOpen(false);
+                    }}
+                  >
+                    <span>{option.value}</span>
+                    {value === option.value ? (
+                      <Check aria-hidden="true" />
+                    ) : null}
+                  </button>
+                </div>
+              );
+            })
+          ) : (
+            <span
+              className={`${styles.modelSelectOption} ${styles.modelSelectOptionDisabled}`}
               role="option"
-              aria-selected={value === model}
-              className={`${styles.modelSelectOption} ${
-                value === model ? styles.modelSelectOptionActive : ""
-              }`}
-              onClick={() => {
-                onChange(model);
-                setOpen(false);
-              }}
+              aria-selected="false"
+              aria-disabled="true"
             >
-              <span>{model}</span>
-              {value === model ? <Check aria-hidden="true" /> : null}
-            </button>
-          ))}
-          <span
-            className={`${styles.modelSelectOption} ${styles.modelSelectOptionDisabled}`}
-            role="option"
-            aria-selected="false"
-            aria-disabled="true"
-          >
-            <span>更多模型敬请期待</span>
-          </span>
+              <span>{emptyLabel}</span>
+            </span>
+          )}
         </div>
       ) : null}
     </div>
@@ -402,6 +442,7 @@ export default function SetupPage() {
   const [draft, setDraft] = useState<SetupDraft>(() =>
     createInitialSetupDraft(),
   );
+  const [llmModels, setLlmModels] = useState<LlmModelOption[]>([]);
   const [touchedFields, setTouchedFields] = useState<
     Partial<Record<SetupFieldPath, boolean>>
   >({});
@@ -510,6 +551,8 @@ export default function SetupPage() {
       finalCheck !== "failed");
   const actionHint = getActionHint();
   const displayActionHint = trimTerminalPunctuation(actionHint);
+  const selectedLlmModel =
+    llmModels.find((option) => option.model === draft.llm.model) ?? null;
 
   function scrollStepErrorIntoView() {
     window.requestAnimationFrame(() => {
@@ -542,21 +585,49 @@ export default function SetupPage() {
   useEffect(() => {
     let cancelled = false;
 
-    const redirectIfSetupDone = async () => {
+    const loadSetupStatus = async () => {
       try {
-        const status = await getOwnerStatus();
-        if (!cancelled && status.ownerReady) {
-          router.replace("/dashboard");
+        const status = await getSetupStatus();
+        if (cancelled) {
+          return;
         }
+        if (!status.needsInitialization) {
+          router.replace("/dashboard");
+          return;
+        }
+        setLlmModels(status.capabilities.llmModels);
+        setDraft((current) => {
+          const currentOption = status.capabilities.llmModels.find(
+            (option) => option.model === current.llm.model,
+          );
+          const nextOption =
+            currentOption ?? status.capabilities.llmModels[0] ?? null;
+          if (!nextOption) {
+            return current;
+          }
+          return {
+            ...current,
+            llm: currentOption
+              ? {
+                  ...current.llm,
+                  baseUrl: current.llm.baseUrl || currentOption.defaultBaseUrl,
+                  thinkingLevel: normalizeThinkingLevel(
+                    currentOption,
+                    current.llm.thinkingLevel,
+                  ),
+                }
+              : llmDraftForModel(nextOption, current.llm),
+          };
+        });
       } catch {
         // Setup should remain reachable if status cannot be resolved.
       }
     };
 
-    void redirectIfSetupDone();
+    void loadSetupStatus();
 
     const handlePageShow = () => {
-      void redirectIfSetupDone();
+      void loadSetupStatus();
     };
 
     window.addEventListener("pageshow", handlePageShow);
@@ -621,7 +692,7 @@ export default function SetupPage() {
   }
 
   function touchStepFields(stepId: SetupStepId = step.id) {
-    const paths = getStepFieldPaths(stepId, draft);
+    const paths = getStepFieldPaths(stepId);
     if (paths.length === 0) {
       return;
     }
@@ -651,11 +722,13 @@ export default function SetupPage() {
     path,
     value,
     options,
+    emptyLabel,
     onChange,
   }: {
     path: Extract<SetupFieldPath, "llm.model" | "embedding.model">;
     value: string;
-    options: string[];
+    options: ModelSelectOption[];
+    emptyLabel?: string;
     onChange: (value: string) => void;
   }) {
     const error = getVisibleFieldError(path);
@@ -669,6 +742,7 @@ export default function SetupPage() {
         <ModelSelect
           value={value}
           options={options}
+          emptyLabel={emptyLabel}
           error={error}
           onChange={onChange}
           onBlur={() => touchField(path)}
@@ -693,7 +767,7 @@ export default function SetupPage() {
 
     if (!currentStepComplete) {
       if (step.id === "llm") {
-        return "当前 LLM 供应商或模式暂未开放。";
+        return "请先完成默认 LLM 服务配置。";
       }
       return "请先完成当前步骤的必填项。";
     }
@@ -768,21 +842,6 @@ export default function SetupPage() {
   };
 
   const testLlmService = async () => {
-    if (
-      draft.llm.provider === "anthropic" ||
-      (draft.llm.provider === "openai" && draft.llm.mode !== "responses")
-    ) {
-      setLlmTest({
-        status: "failed",
-        feedback: localFeedback(
-          "当前模式暂不可用",
-          "涉及字段：LLM 供应商",
-          "UNSUPPORTED",
-        ),
-      });
-      return false;
-    }
-
     const errors = getStepValidationErrors("llm", draft);
     if (errors[0]) {
       touchStepFields("llm");
@@ -996,7 +1055,13 @@ export default function SetupPage() {
               type="button"
               className={styles.textButton}
               onClick={() => {
-                setDraft(createInitialSetupDraft());
+                setDraft(() => {
+                  const next = createInitialSetupDraft();
+                  const option = llmModels[0] ?? null;
+                  return option
+                    ? { ...next, llm: llmDraftForModel(option, next.llm) }
+                    : next;
+                });
                 resetLlmTest();
                 resetEmbeddingTest();
                 setTouchedFields({});
@@ -1058,226 +1123,105 @@ export default function SetupPage() {
   function renderStepContent() {
     switch (step.id) {
       case "llm": {
-        const llmComingSoon =
-          draft.llm.provider === "anthropic" ||
-          (draft.llm.provider === "openai" && draft.llm.mode !== "responses");
-
         return (
           <div className={styles.stack}>
-            <div
-              className={`${styles.segmentedControl} ${styles.segmentedTriple}`}
-              role="tablist"
-              aria-label="LLM 服务供应商"
-            >
-              <button
-                type="button"
-                role="tab"
-                aria-selected={draft.llm.provider === "google"}
-                className={`${styles.segmentedTab} ${
-                  draft.llm.provider === "google" ? styles.segmentedActive : ""
-                }`}
-                onClick={() => updateLlm(llmDefaults.google)}
+            <div className={styles.formGrid}>
+              {renderModelSelectField({
+                path: "llm.model",
+                value: draft.llm.model,
+                options: buildLlmModelSelectOptions(llmModels),
+                emptyLabel: "正在加载模型列表",
+                onChange: (model) => {
+                  const option = llmModels.find(
+                    (candidate) => candidate.model === model,
+                  );
+                  updateLlm(
+                    option ? llmDraftForModel(option, draft.llm) : { model },
+                  );
+                },
+              })}
+              {selectedLlmModel?.capabilities.thinkingLevels.length ? (
+                <div className={styles.setupControlGroup}>
+                  <span className={styles.setupControlTitle}>思考等级</span>
+                  <div
+                    className={styles.segmentedControl}
+                    role="tablist"
+                    aria-label="LLM 思考等级"
+                    style={{
+                      gridTemplateColumns: `repeat(${selectedLlmModel.capabilities.thinkingLevels.length}, minmax(0, 1fr))`,
+                    }}
+                  >
+                    {selectedLlmModel.capabilities.thinkingLevels.map(
+                      (level) => (
+                        <button
+                          key={level}
+                          type="button"
+                          role="tab"
+                          aria-selected={draft.llm.thinkingLevel === level}
+                          className={`${styles.segmentedTab} ${
+                            draft.llm.thinkingLevel === level
+                              ? styles.segmentedActive
+                              : ""
+                          }`}
+                          onClick={() => updateLlm({ thinkingLevel: level })}
+                        >
+                          {thinkingLevelLabels[level]}
+                        </button>
+                      ),
+                    )}
+                  </div>
+                </div>
+              ) : null}
+              <Field
+                label="Base URL"
+                error={getVisibleFieldError("llm.baseUrl")}
               >
-                Google
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={draft.llm.provider === "openai"}
-                className={`${styles.segmentedTab} ${
-                  draft.llm.provider === "openai" ? styles.segmentedActive : ""
-                }`}
-                onClick={() => updateLlm(llmDefaults.openai)}
-              >
-                OpenAI
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={draft.llm.provider === "anthropic"}
-                className={`${styles.segmentedTab} ${
-                  draft.llm.provider === "anthropic"
-                    ? styles.segmentedActive
-                    : ""
-                }`}
-                onClick={() => updateLlm(llmDefaults.anthropic)}
-              >
-                Anthropic
-              </button>
-            </div>
-            {draft.llm.provider === "google" ? (
-              <label className={styles.switchRow}>
-                <span>
-                  <strong>使用 Vertex AI</strong>
-                </span>
                 <input
-                  type="checkbox"
-                  role="switch"
-                  checked={draft.llm.useVertexAi}
+                  value={draft.llm.baseUrl}
+                  placeholder={selectedLlmModel?.defaultBaseUrl ?? ""}
+                  required
+                  aria-required="true"
+                  {...getFieldControlProps("llm.baseUrl")}
                   onChange={(event) =>
-                    updateLlm({ useVertexAi: event.target.checked })
+                    updateLlm({ baseUrl: event.target.value })
                   }
                 />
-                <span className={styles.switchTrack} aria-hidden="true">
-                  <span className={styles.switchThumb} />
-                </span>
-              </label>
-            ) : draft.llm.provider === "openai" ? (
-              <div className={styles.setupControlGroup}>
-                <span className={styles.setupControlTitle}>接口协议</span>
-                <div
-                  className={styles.segmentedControl}
-                  role="tablist"
-                  aria-label="OpenAI 接口协议"
-                >
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={draft.llm.mode === "chat"}
-                    className={`${styles.segmentedTab} ${
-                      draft.llm.mode === "chat" ? styles.segmentedActive : ""
-                    }`}
-                    onClick={() => updateLlm({ mode: "chat" })}
-                  >
-                    Chat Completions
-                  </button>
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={draft.llm.mode === "responses"}
-                    className={`${styles.segmentedTab} ${
-                      draft.llm.mode === "responses"
-                        ? styles.segmentedActive
-                        : ""
-                    }`}
-                    onClick={() => updateLlm({ mode: "responses" })}
-                  >
-                    Responses API
-                  </button>
-                </div>
+              </Field>
+              <Field label="ApiKey" error={getVisibleFieldError("llm.apiKey")}>
+                <input
+                  value={draft.llm.apiKey}
+                  placeholder={
+                    selectedLlmModel
+                      ? apiKeyPlaceholders[selectedLlmModel.provider]
+                      : "输入 API Key"
+                  }
+                  autoComplete="off"
+                  required
+                  aria-required="true"
+                  {...getFieldControlProps("llm.apiKey")}
+                  onChange={(event) =>
+                    updateLlm({ apiKey: event.target.value })
+                  }
+                />
+              </Field>
+            </div>
+            <ServiceTestButton
+              status={llmTest.status}
+              disabled={busy || isFinalTesting}
+              onClick={() => {
+                setNotice(null);
+                void testLlmService().then((ok) => {
+                  if (!ok) {
+                    scrollStepErrorIntoView();
+                  }
+                });
+              }}
+            />
+            {llmTest.status === "failed" ? (
+              <div ref={stepErrorRef}>
+                <CheckFeedbackDetails feedback={llmTest.feedback} />
               </div>
             ) : null}
-            {llmComingSoon ? (
-              <div className={styles.comingSoonPanel}>
-                <span>coming soon</span>
-              </div>
-            ) : (
-              <>
-                <div className={styles.formGrid}>
-                  {renderModelSelectField({
-                    path: "llm.model",
-                    value: draft.llm.model,
-                    options: llmModelOptions[draft.llm.provider],
-                    onChange: (model) => updateLlm({ model }),
-                  })}
-                  {draft.llm.provider === "google" && draft.llm.useVertexAi ? (
-                    <>
-                      <Field
-                        label="项目"
-                        hint="填写 Google Cloud 项目 ID"
-                        error={getVisibleFieldError("llm.project")}
-                      >
-                        <input
-                          value={draft.llm.project}
-                          placeholder="my-gcp-project"
-                          required
-                          aria-required="true"
-                          {...getFieldControlProps("llm.project")}
-                          onChange={(event) =>
-                            updateLlm({ project: event.target.value })
-                          }
-                        />
-                      </Field>
-                      <Field
-                        label="区域"
-                        hint="填写 Vertex AI 区域"
-                        error={getVisibleFieldError("llm.location")}
-                      >
-                        <input
-                          value={draft.llm.location}
-                          placeholder="global"
-                          required
-                          aria-required="true"
-                          {...getFieldControlProps("llm.location")}
-                          onChange={(event) =>
-                            updateLlm({ location: event.target.value })
-                          }
-                        />
-                      </Field>
-                      <Field
-                        label="凭据 JSON"
-                        error={getVisibleFieldError("llm.credentialsFile")}
-                      >
-                        <ScrollablePlaceholderTextarea
-                          value={draft.llm.credentialsFile}
-                          placeholder={vertexCredentialsJsonPlaceholder}
-                          rows={5}
-                          required
-                          aria-required="true"
-                          {...getFieldControlProps("llm.credentialsFile")}
-                          onChange={(value) =>
-                            updateLlm({
-                              credentialsFile: value,
-                            })
-                          }
-                        />
-                      </Field>
-                    </>
-                  ) : (
-                    <>
-                      <Field
-                        label="Base URL"
-                        error={getVisibleFieldError("llm.baseUrl")}
-                      >
-                        <input
-                          value={draft.llm.baseUrl}
-                          placeholder={llmDefaults[draft.llm.provider].baseUrl}
-                          required
-                          aria-required="true"
-                          {...getFieldControlProps("llm.baseUrl")}
-                          onChange={(event) =>
-                            updateLlm({ baseUrl: event.target.value })
-                          }
-                        />
-                      </Field>
-                      <Field
-                        label="ApiKey"
-                        error={getVisibleFieldError("llm.apiKey")}
-                      >
-                        <input
-                          value={draft.llm.apiKey}
-                          placeholder={apiKeyPlaceholders[draft.llm.provider]}
-                          autoComplete="off"
-                          required
-                          aria-required="true"
-                          {...getFieldControlProps("llm.apiKey")}
-                          onChange={(event) =>
-                            updateLlm({ apiKey: event.target.value })
-                          }
-                        />
-                      </Field>
-                    </>
-                  )}
-                </div>
-                <ServiceTestButton
-                  status={llmTest.status}
-                  disabled={busy || isFinalTesting}
-                  onClick={() => {
-                    setNotice(null);
-                    void testLlmService().then((ok) => {
-                      if (!ok) {
-                        scrollStepErrorIntoView();
-                      }
-                    });
-                  }}
-                />
-                {llmTest.status === "failed" ? (
-                  <div ref={stepErrorRef}>
-                    <CheckFeedbackDetails feedback={llmTest.feedback} />
-                  </div>
-                ) : null}
-              </>
-            )}
           </div>
         );
       }
@@ -1316,122 +1260,48 @@ export default function SetupPage() {
                 OpenAI
               </button>
             </div>
-            {draft.embedding.provider === "google" ? (
-              <label className={styles.switchRow}>
-                <span>
-                  <strong>使用 Vertex AI</strong>
-                </span>
-                <input
-                  type="checkbox"
-                  role="switch"
-                  checked={draft.embedding.useVertexAi}
-                  onChange={(event) =>
-                    updateEmbedding({ useVertexAi: event.target.checked })
-                  }
-                />
-                <span className={styles.switchTrack} aria-hidden="true">
-                  <span className={styles.switchThumb} />
-                </span>
-              </label>
-            ) : null}
             <div className={styles.formGrid}>
               {renderModelSelectField({
                 path: "embedding.model",
                 value: draft.embedding.model,
-                options: embeddingModelOptions[draft.embedding.provider],
+                options: embeddingModelOptions[draft.embedding.provider].map(
+                  (model) => ({ value: model }),
+                ),
                 onChange: (model) => updateEmbedding({ model }),
               })}
-              {draft.embedding.provider === "google" &&
-              draft.embedding.useVertexAi ? (
-                <>
-                  <Field
-                    label="项目"
-                    hint="填写 Google Cloud 项目 ID"
-                    error={getVisibleFieldError("embedding.project")}
-                  >
-                    <input
-                      value={draft.embedding.project}
-                      placeholder="my-gcp-project"
-                      required
-                      aria-required="true"
-                      {...getFieldControlProps("embedding.project")}
-                      onChange={(event) =>
-                        updateEmbedding({ project: event.target.value })
-                      }
-                    />
-                  </Field>
-                  <Field
-                    label="区域"
-                    hint="填写 Vertex AI 区域"
-                    error={getVisibleFieldError("embedding.location")}
-                  >
-                    <input
-                      value={draft.embedding.location}
-                      placeholder="global"
-                      required
-                      aria-required="true"
-                      {...getFieldControlProps("embedding.location")}
-                      onChange={(event) =>
-                        updateEmbedding({ location: event.target.value })
-                      }
-                    />
-                  </Field>
-                  <Field
-                    label="凭据 JSON"
-                    error={getVisibleFieldError("embedding.credentialsFile")}
-                  >
-                    <ScrollablePlaceholderTextarea
-                      value={draft.embedding.credentialsFile}
-                      placeholder={vertexCredentialsJsonPlaceholder}
-                      rows={5}
-                      required
-                      aria-required="true"
-                      {...getFieldControlProps("embedding.credentialsFile")}
-                      onChange={(value) =>
-                        updateEmbedding({
-                          credentialsFile: value,
-                        })
-                      }
-                    />
-                  </Field>
-                </>
-              ) : (
-                <>
-                  <Field
-                    label="Base URL"
-                    error={getVisibleFieldError("embedding.baseUrl")}
-                  >
-                    <input
-                      value={draft.embedding.baseUrl}
-                      placeholder={
-                        embeddingDefaults[draft.embedding.provider].baseUrl
-                      }
-                      required
-                      aria-required="true"
-                      {...getFieldControlProps("embedding.baseUrl")}
-                      onChange={(event) =>
-                        updateEmbedding({ baseUrl: event.target.value })
-                      }
-                    />
-                  </Field>
-                  <Field
-                    label="ApiKey"
-                    error={getVisibleFieldError("embedding.apiKey")}
-                  >
-                    <input
-                      value={draft.embedding.apiKey}
-                      placeholder={apiKeyPlaceholders[draft.embedding.provider]}
-                      autoComplete="off"
-                      required
-                      aria-required="true"
-                      {...getFieldControlProps("embedding.apiKey")}
-                      onChange={(event) =>
-                        updateEmbedding({ apiKey: event.target.value })
-                      }
-                    />
-                  </Field>
-                </>
-              )}
+              <Field
+                label="Base URL"
+                error={getVisibleFieldError("embedding.baseUrl")}
+              >
+                <input
+                  value={draft.embedding.baseUrl}
+                  placeholder={
+                    embeddingDefaults[draft.embedding.provider].baseUrl
+                  }
+                  required
+                  aria-required="true"
+                  {...getFieldControlProps("embedding.baseUrl")}
+                  onChange={(event) =>
+                    updateEmbedding({ baseUrl: event.target.value })
+                  }
+                />
+              </Field>
+              <Field
+                label="ApiKey"
+                error={getVisibleFieldError("embedding.apiKey")}
+              >
+                <input
+                  value={draft.embedding.apiKey}
+                  placeholder={apiKeyPlaceholders[draft.embedding.provider]}
+                  autoComplete="off"
+                  required
+                  aria-required="true"
+                  {...getFieldControlProps("embedding.apiKey")}
+                  onChange={(event) =>
+                    updateEmbedding({ apiKey: event.target.value })
+                  }
+                />
+              </Field>
             </div>
             <ServiceTestButton
               status={embeddingTest.status}

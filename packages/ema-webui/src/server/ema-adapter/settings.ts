@@ -6,12 +6,14 @@ import {
   type EffectiveActorSettings,
   type EmbeddingConfig,
   type LLMConfig,
+  resolveLLMModelDefinition,
   type VectorIndexStatus,
   type WebSearchConfig,
 } from "ema";
 import type {
   GlobalEmbeddingIndexStatus,
   GlobalEmbeddingConfig,
+  LlmModelProvider,
   ActorQQBlockedBy,
   ActorLlmConfig,
   ActorQQConfig,
@@ -30,23 +32,36 @@ export interface CoreConversationForQq {
 
 export function toWebLlmConfig(config: LLMConfig): ActorLlmConfig {
   return {
-    provider: config.provider,
-    openai: {
-      mode: config.openai.mode,
-      model: config.openai.model,
-      baseUrl: config.openai.baseUrl,
-      apiKey: config.openai.apiKey,
-    },
-    google: {
-      model: config.google.model,
-      baseUrl: config.google.baseUrl,
-      apiKey: config.google.apiKey,
-      useVertexAi: config.google.useVertexAi,
-      project: config.google.project,
-      location: config.google.location,
-      credentialsFile: config.google.credentialsFile,
-    },
+    model: config.model,
+    baseUrl: config.baseUrl,
+    apiKey: config.apiKey,
+    ...(config.thinkingLevel ? { thinkingLevel: config.thinkingLevel } : {}),
   };
+}
+
+export function toCoreLlmConfig(config: ActorLlmConfig): LLMConfig {
+  return {
+    model: config.model.trim(),
+    baseUrl: config.baseUrl.trim(),
+    apiKey: config.apiKey.trim(),
+    ...(config.thinkingLevel
+      ? { thinkingLevel: config.thinkingLevel as LLMConfig["thinkingLevel"] }
+      : {}),
+  };
+}
+
+export function toWebLlmModelProvider(config: LLMConfig): LlmModelProvider {
+  try {
+    return resolveLLMModelDefinition(config.model).provider;
+  } catch {
+    if (config.model.startsWith("gpt") || config.baseUrl.includes("openai")) {
+      return "openai";
+    }
+    if (config.baseUrl.includes("anthropic")) {
+      return "anthropic";
+    }
+    return "google";
+  }
 }
 
 export function toWebEmbeddingConfig(
@@ -54,20 +69,9 @@ export function toWebEmbeddingConfig(
 ): GlobalEmbeddingConfig {
   return {
     provider: config.provider,
-    openai: {
-      model: config.openai.model,
-      baseUrl: config.openai.baseUrl,
-      apiKey: config.openai.apiKey,
-    },
-    google: {
-      model: config.google.model,
-      baseUrl: config.google.baseUrl,
-      apiKey: config.google.apiKey,
-      useVertexAi: config.google.useVertexAi,
-      project: config.google.project,
-      location: config.google.location,
-      credentialsFile: config.google.credentialsFile,
-    },
+    model: config.model,
+    baseUrl: config.baseUrl,
+    apiKey: config.apiKey,
   };
 }
 

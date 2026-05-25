@@ -3,46 +3,24 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import type { ActorEntity } from "../../db";
 import { createBootstrapConfig, GlobalConfig } from "../../config";
 import { createTestGlobalConfigRecord } from "../../config/tests/helpers";
+import { ThinkingLevel } from "../../llm";
 import { MemFs } from "../../shared/fs";
 import { SettingsController } from "../settings_controller";
 
 type PersistedActor = ActorEntity & { id: number };
 
 const validLlmConfig = {
-  provider: "openai",
-  openai: {
-    mode: "responses",
-    model: "gpt-5-mini",
-    baseUrl: "https://api.openai.com/v1",
-    apiKey: "sk-test",
-  },
-  google: {
-    model: "",
-    baseUrl: "",
-    apiKey: "",
-    useVertexAi: false,
-    project: "",
-    location: "",
-    credentialsFile: "",
-  },
+  model: "gpt-5.5",
+  baseUrl: "https://api.openai.com/v1",
+  apiKey: "sk-test",
+  thinkingLevel: ThinkingLevel.MEDIUM,
 } as const;
 
 const validEmbeddingConfig = {
   provider: "openai",
-  openai: {
-    model: "text-embedding-3-small",
-    baseUrl: "https://api.openai.com/v1",
-    apiKey: "sk-test",
-  },
-  google: {
-    model: "",
-    baseUrl: "",
-    apiKey: "",
-    useVertexAi: false,
-    project: "",
-    location: "",
-    credentialsFile: "",
-  },
+  model: "text-embedding-3-small",
+  baseUrl: "https://api.openai.com/v1",
+  apiKey: "sk-test",
 } as const;
 
 function createFixture() {
@@ -105,6 +83,28 @@ describe("SettingsController", () => {
     GlobalConfig.resetForTests();
   });
 
+  test("lists AgentHub LLM model options for API clients", () => {
+    const fixture = createFixture();
+
+    expect(fixture.controller.listLlmModels()).toContainEqual({
+      model: "gemini-3.1-pro-preview",
+      provider: "google",
+      defaultBaseUrl: "https://generativelanguage.googleapis.com",
+      capabilities: {
+        thinkingLevels: [
+          ThinkingLevel.LOW,
+          ThinkingLevel.MEDIUM,
+          ThinkingLevel.HIGH,
+        ],
+        tools: true,
+        images: true,
+      },
+      requestDefaults: {
+        thinkingLevel: ThinkingLevel.MEDIUM,
+      },
+    });
+  });
+
   test("saves actor LLM config without probing the provider", async () => {
     const fixture = createFixture();
     const probe = vi
@@ -136,18 +136,30 @@ describe("SettingsController", () => {
     expect(fixture.publishUpdated).toHaveBeenCalledWith(1);
   });
 
-  test("rejects unsupported LLM configs before saving", async () => {
+  test("rejects unknown LLM models before saving", async () => {
     const fixture = createFixture();
 
     await expect(
       fixture.controller.saveLlmConfig(1, {
         ...validLlmConfig,
-        openai: {
-          ...validLlmConfig.openai,
-          mode: "chat",
-        },
+        model: "unknown-model",
       }),
-    ).rejects.toThrow("OpenAI Chat Completions mode is not supported yet.");
+    ).rejects.toThrow("Unsupported LLM model: unknown-model");
+
+    expect(fixture.actorDB.upsertActor).not.toHaveBeenCalled();
+  });
+
+  test("rejects unsupported thinking levels before saving", async () => {
+    const fixture = createFixture();
+
+    await expect(
+      fixture.controller.saveLlmConfig(1, {
+        model: "qwen3",
+        baseUrl: "http://127.0.0.1:8000/v1/",
+        apiKey: "local-key",
+        thinkingLevel: ThinkingLevel.MEDIUM,
+      }),
+    ).rejects.toThrow("qwen3 does not support thinking level: medium");
 
     expect(fixture.actorDB.upsertActor).not.toHaveBeenCalled();
   });

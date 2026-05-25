@@ -1,105 +1,103 @@
-/**
- * Elegant retry mechanism module
- *
- * Provides decorators and utility functions to support retry logic for async functions.
- *
- * Features:
- * - Supports exponential backoff strategy
- * - Configurable retry count and intervals
- * - Supports specifying retryable exception types
- * - Detailed logging
- * - Fully decoupled, non-invasive to business code
- */
+/** Retry policy applied to provider requests. */
 export class RetryConfig {
+  /**
+   * Creates retry policy settings.
+   *
+   * @param enabled - Whether retry is enabled.
+   * @param maxRetries - Maximum number of retry attempts after the first call.
+   * @param initialDelay - Initial retry delay in seconds.
+   * @param maxDelay - Maximum retry delay in seconds.
+   * @param exponentialBase - Exponential backoff multiplier.
+   */
   constructor(
-    /**
-     * Whether to enable retry mechanism
-     */
     public readonly enabled: boolean = true,
-    /**
-     * Maximum number of retries
-     */
-    public readonly max_retries: number = 3,
-    /**
-     * Initial delay time (seconds)
-     */
-    public readonly initial_delay: number = 1.0,
-    /**
-     * Maximum delay time (seconds)
-     */
-    public readonly max_delay: number = 60.0,
-    /**
-     * Exponential backoff base
-     */
-    public readonly exponential_base: number = 2.0,
-    /**
-     * Retryable exception types
-     */
-    // public readonly retryable_exceptions: Array<typeof Error> = [Error],
+    public readonly maxRetries: number = 3,
+    public readonly initialDelay: number = 1.0,
+    public readonly maxDelay: number = 60.0,
+    public readonly exponentialBase: number = 2.0,
   ) {}
 }
 
 /**
- * Calculate delay time (exponential backoff)
+ * Calculates the next retry delay using exponential backoff.
  *
- * @param attempt - Current attempt number (starting from 0)
- * @returns Delay time (seconds)
+ * @param attempt - Zero-based retry attempt.
+ * @param initialDelay - Initial retry delay in seconds.
+ * @param exponentialBase - Exponential backoff multiplier.
+ * @param maxDelay - Maximum retry delay in seconds.
+ * @returns Delay in seconds.
  */
 function calculateDelay(
   attempt: number,
-  initial_delay: number,
-  exponential_base: number,
-  max_delay: number,
+  initialDelay: number,
+  exponentialBase: number,
+  maxDelay: number,
 ): number {
-  const delay = initial_delay * Math.pow(exponential_base, attempt);
-  return Math.min(delay, max_delay);
+  const delay = initialDelay * Math.pow(exponentialBase, attempt);
+  return Math.min(delay, maxDelay);
 }
 
+/** Error thrown when all retry attempts have been exhausted. */
 export class RetryExhaustedError extends Error {
-  public lastException: Error;
-  public attempts: number;
-
-  constructor(lastException: Error, attempts: number) {
+  /**
+   * Creates a retry exhaustion error.
+   *
+   * @param lastException - Last error thrown by the wrapped operation.
+   * @param attempts - Total number of attempts performed.
+   */
+  constructor(
+    public readonly lastException: Error,
+    public readonly attempts: number,
+  ) {
     super(
       `Retry failed after ${attempts} attempts. Last error: ${lastException.message}`,
     );
     this.name = "RetryExhaustedError";
-    this.lastException = lastException;
-    this.attempts = attempts;
   }
 }
 
+/**
+ * Checks whether an error represents request cancellation.
+ *
+ * @param error - Unknown thrown value to inspect.
+ * @returns `true` when the error should bypass retry handling.
+ */
 export function isAbortError(error: unknown): boolean {
   if (!(error instanceof Error)) {
     return false;
   }
-  if (error.name === "AbortError") {
-    return true;
-  }
-  return error.message.toLowerCase().includes("abort");
+  return (
+    error.name === "AbortError" || error.message.toLowerCase().includes("abort")
+  );
 }
 
 /**
- * Wrap a standalone async function with retry logic (non-decorator usage).
- * Useful when you want a callable instead of applying a class method decorator.
+ * Wraps an async function with retry handling.
+ *
+ * Abort errors are never retried. Other errors are retried according to the
+ * supplied `RetryConfig`.
+ *
+ * @typeParam T - Async function type to wrap.
+ * @param originalMethod - Async function to execute with retry.
+ * @param config - Retry policy.
+ * @param onRetry - Callback invoked before each retry attempt.
+ * @returns A function with the same signature as `originalMethod`.
  */
 export function wrapWithRetry<T extends (...args: any[]) => Promise<any>>(
   originalMethod: T,
-  /**
-   * Retry configuration
-   */
   config: RetryConfig = new RetryConfig(),
-  /**
-   * Callback function on retry, receives exception and current attempt number
-   */
   onRetry?: (exception: Error, attempt: number) => void,
 ): T {
-  if (config.max_retries <= 0) {
+  if (!config.enabled) {
+    return originalMethod;
+  }
+  if (config.maxRetries <= 0) {
     throw new Error("Max retries must be greater than 0");
   }
+
   return async function (...args: any[]) {
     let lastException: Error | undefined;
-    for (let attempt = 0; attempt <= config.max_retries; attempt++) {
+    for (let attempt = 0; attempt <= config.maxRetries; attempt++) {
       try {
         return await originalMethod(...args);
       } catch (exception) {
@@ -107,26 +105,22 @@ export function wrapWithRetry<T extends (...args: any[]) => Promise<any>>(
         if (isAbortError(lastException)) {
           throw lastException;
         }
-        if (attempt >= config.max_retries) {
+        if (attempt >= config.maxRetries) {
           throw new RetryExhaustedError(lastException, attempt + 1);
         }
+        onRetry?.(lastException, attempt + 1);
         const delay = calculateDelay(
           attempt,
-          config.initial_delay,
-          config.exponential_base,
-          config.max_delay,
+          config.initialDelay,
+          config.exponentialBase,
+          config.maxDelay,
         );
-        // Call callback function
-        if (onRetry) {
-          onRetry(lastException, attempt + 1);
-        }
-        // Wait before retry
         await new Promise((resolve) => setTimeout(resolve, delay * 1000));
       }
     }
     if (lastException) {
       throw lastException;
     }
-    throw new Error("Unknown error");
+    throw new Error("Unknown retry error");
   } as T;
 }

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { collapseContentsToText } from "../shared/schema";
+import { collapseContentsToText } from "../llm/utils";
 import { formatTimestamp } from "../shared/utils";
 import { formatReplyRef } from "../channel";
 import {

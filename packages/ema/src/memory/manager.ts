@@ -9,6 +9,7 @@ import type {
   ShortTermMemoryRecord,
 } from "./base";
 import type {
+  ConversationEntity,
   ConversationMessageEntity,
   ListShortTermMemoriesRequest,
 } from "../db";
@@ -20,7 +21,7 @@ import { stickerIdToInlineData } from "../skills/sticker-skill/utils";
 import { buildPromptFromBufferMessage, isActorChatInput } from "./utils";
 import { parseReplyRef, resolveSession } from "../channel";
 import type { Server } from "../server";
-import type { InlineDataItem, InputContent } from "../shared/schema";
+import type { InlineDataItem, InputContent } from "../llm/schema";
 import { formatTimestamp, parseTimestamp } from "../shared/utils";
 import { skillsPrompt } from "../skills";
 import type { EmaReply } from "../tools/ema_reply_tool";
@@ -116,7 +117,7 @@ export class MemoryManager implements BufferStorage, ActorMemory {
     }
     const ownerUid = await this.getOwnerUid(actorId, sessionInfo.channel);
     return {
-      conversationDescription: conversation.description ?? "None.",
+      conversationDescription: this.buildConversationDescription(conversation),
       bufferText:
         buffer.length === 0
           ? "None."
@@ -129,6 +130,16 @@ export class MemoryManager implements BufferStorage, ActorMemory {
       activityMemory,
       sessionType: sessionInfo.type,
     };
+  }
+
+  private buildConversationDescription(
+    conversation: Pick<ConversationEntity, "name" | "description">,
+  ): string {
+    const description = [conversation.name, conversation.description]
+      .map((value) => value?.trim() ?? "")
+      .filter((value) => value.length > 0)
+      .join("\n");
+    return description || "None.";
   }
 
   private async getDetachedMemoryPromptValues(

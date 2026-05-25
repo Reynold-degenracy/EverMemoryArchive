@@ -12,7 +12,9 @@ import type {
   WebSearchConfig,
 } from "../config";
 import type { VectorIndexStatus } from "../db";
-import type { InputContent } from "../shared/schema";
+import type { InputContent } from "../llm/schema";
+import type { ThinkingLevel } from "../llm/base";
+import type { LLMProvider } from "../llm/models";
 import type { MessageReplyRef } from "../channel";
 
 export type ActorRuntimeStatus = "offline" | "sleep" | "online" | "busy";
@@ -83,6 +85,20 @@ export interface EffectiveActorSettings {
   llm: LLMConfig;
   webSearch: WebSearchConfig;
   channel: ChannelConfig;
+}
+
+export interface LlmModelOption {
+  model: string;
+  provider: LLMProvider;
+  defaultBaseUrl: string;
+  capabilities: {
+    thinkingLevels: ThinkingLevel[];
+    tools: boolean;
+    images: boolean;
+  };
+  requestDefaults: {
+    thinkingLevel?: ThinkingLevel;
+  };
 }
 
 export interface LlmProbeResult {
