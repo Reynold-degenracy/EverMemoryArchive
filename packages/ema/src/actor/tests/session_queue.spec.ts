@@ -248,4 +248,31 @@ describe("SessionManager", () => {
     expect(manager.pickNextConversationId(0)).toBe(3);
     expect(manager.tryPop(2, 0)).toBeNull();
   });
+
+  test("tracks conversation activity state separately from queue items", () => {
+    const manager = new SessionManager(() => {});
+
+    expect(manager.getActivityState(2)).toBe("inactive");
+
+    manager.activateConversation(2);
+    expect(manager.getActivityState(2)).toBe("active");
+    expect(manager.listActiveConversationIds()).toEqual([2]);
+
+    manager.deactivateConversation(2);
+    expect(manager.getActivityState(2)).toBe("inactive");
+    expect(manager.listActiveConversationIds()).toEqual([]);
+  });
+
+  test("clears active conversation state when dropping queues", () => {
+    const manager = new SessionManager(() => {});
+
+    manager.enqueue(2, createSystemInput("first"));
+    manager.activateConversation(2);
+    manager.activateConversation(3);
+
+    expect(manager.dropConversation(2)).toBe(1);
+
+    expect(manager.getActivityState(2)).toBe("inactive");
+    expect(manager.listActiveConversationIds()).toEqual([3]);
+  });
 });

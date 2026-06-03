@@ -20,6 +20,13 @@ import {
 import type { JobHandler } from "../base";
 
 const actorMemoryRollupQueue = new Map<number, Promise<unknown>>();
+const deferredForcedConversationRollups = new Map<
+  number,
+  {
+    job: ConversationRollupTaskData;
+    context: ActorBackgroundRunContext;
+  }
+>();
 
 type SleepTaskSource = "schedule" | "timer";
 type ActorBackgroundTaskName = ActorBackgroundJobData["task"];
@@ -83,6 +90,7 @@ interface ConversationRollupTaskData {
   conversationId: number;
   prompt: string;
   triggeredAt: number;
+  force?: boolean;
   followUp?: boolean;
 }
 
@@ -242,6 +250,7 @@ export async function runActorBackgroundJob(
             conversationId: job.conversationId,
             prompt: job.prompt ?? "",
             triggeredAt,
+            force: isForceConversationRollup(job.addition),
           },
           context,
         );
@@ -405,11 +414,20 @@ async function runConversationRollupTask(
     context,
   );
   if (!server.memoryManager.tryEnterConversationActivity(job.conversationId)) {
+    const deferred = job.force === true;
+    if (deferred) {
+      deferredForcedConversationRollups.set(job.conversationId, {
+        job,
+        context,
+      });
+    }
     logBackgroundTaskSkipped(
       server,
       logData,
       "already_running",
       {
+        ...(job.force ? { force: true } : {}),
+        ...(deferred ? { deferred: true } : {}),
         ...(job.followUp ? { followUp: true } : {}),
       },
       context,
@@ -445,6 +463,22 @@ async function runConversationRollupTask(
           {
             pendingCount: pendingBefore.count,
             threshold,
+            ...(job.force ? { force: true } : {}),
+            ...(job.followUp ? { followUp: true } : {}),
+          },
+          context,
+        );
+        runResult = await runConversationRollupTaskOnce(server, job, context);
+        didConsumePending = runResult.processedMessageCount > 0;
+      } else if (job.force && pendingBefore.count > 0) {
+        ranOnce = true;
+        startedAt = logBackgroundTaskStarted(
+          server,
+          logData,
+          {
+            pendingCount: pendingBefore.count,
+            threshold,
+            force: true,
             ...(job.followUp ? { followUp: true } : {}),
           },
           context,
@@ -479,6 +513,7 @@ async function runConversationRollupTask(
           pendingAfter: pendingAfter.count,
           threshold,
           followUpScheduled,
+          ...(job.force ? { force: true } : {}),
           ...(job.followUp ? { followUp: true } : {}),
         },
         context,
@@ -494,24 +529,25 @@ async function runConversationRollupTask(
           pendingBefore: pendingBefore.count,
           pendingAfter: pendingAfter.count,
           followUpScheduled,
+          ...(job.force ? { force: true } : {}),
           ...(job.followUp ? { followUp: true } : {}),
         },
         context,
       );
       completed = true;
     }
-    if (!followUpScheduled) {
-      return;
+    if (followUpScheduled) {
+      await runConversationRollupTask(
+        server,
+        {
+          ...job,
+          triggeredAt: latestAt,
+          followUp: true,
+        },
+        context,
+      );
     }
-    await runConversationRollupTask(
-      server,
-      {
-        ...job,
-        triggeredAt: latestAt,
-        followUp: true,
-      },
-      context,
-    );
+    await runDeferredForcedConversationRollup(server, job.conversationId);
   } catch (error) {
     if (startedAt !== null && !completed) {
       logBackgroundTaskFailed(
@@ -525,6 +561,27 @@ async function runConversationRollupTask(
     }
     throw error;
   }
+}
+
+async function runDeferredForcedConversationRollup(
+  server: Server,
+  conversationId: number,
+): Promise<void> {
+  const deferred = deferredForcedConversationRollups.get(conversationId);
+  if (!deferred) {
+    return;
+  }
+  deferredForcedConversationRollups.delete(conversationId);
+  await runConversationRollupTask(
+    server,
+    {
+      ...deferred.job,
+      triggeredAt: Date.now(),
+      force: true,
+      followUp: true,
+    },
+    deferred.context,
+  );
 }
 
 /**
@@ -594,13 +651,15 @@ async function runConversationRollupTaskOnce(
   await runBackgroundAgentWithState(server, agent, agentState);
   const activityAdded = agentState.toolContext?.data?.activityAdded === true;
   let processedMessageCount = 0;
-  if (activityAdded) {
+  if (activityAdded || job.force) {
     processedMessageCount =
       await server.memoryManager.markConversationMessagesActivityProcessed(
         job.conversationId,
-        bufferSnapshot.msgIds,
+        bufferSnapshot.activityTargetMsgIds,
         job.triggeredAt,
       );
+  }
+  if (activityAdded) {
     await runThresholdMemoryRollupWhenNeeded(
       server,
       job.actorId,
@@ -1561,6 +1620,12 @@ function shouldScheduleFollowUp(
 
 function isThresholdTriggered(addition?: Record<string, unknown>): boolean {
   return addition?.source === "threshold" || addition?.reason === "threshold";
+}
+
+function isForceConversationRollup(
+  addition?: Record<string, unknown>,
+): boolean {
+  return addition?.force === true;
 }
 
 function stripInternalSleepSource(

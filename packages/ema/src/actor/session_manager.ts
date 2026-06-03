@@ -6,9 +6,11 @@ import {
 } from "./session_queue";
 
 export type SessionManagerQueueEvent = SessionQueueEvent;
+export type SessionActivityState = "inactive" | "active";
 
 export class SessionManager {
   private readonly queues = new Map<number, SessionQueue<ActorInput>>();
+  private readonly activityStates = new Map<number, SessionActivityState>();
 
   constructor(
     private readonly onQueueUnlocked: (conversationId: number) => void,
@@ -24,8 +26,40 @@ export class SessionManager {
     queue.push(input);
   }
 
+  getActivityState(conversationId: number): SessionActivityState {
+    return this.activityStates.get(conversationId) ?? "inactive";
+  }
+
+  activateConversation(conversationId: number): void {
+    this.activityStates.set(conversationId, "active");
+  }
+
+  deactivateConversation(conversationId: number): void {
+    this.activityStates.set(conversationId, "inactive");
+  }
+
+  listActiveConversationIds(): number[] {
+    return Array.from(this.activityStates.entries())
+      .filter(([, state]) => state === "active")
+      .map(([conversationId]) => conversationId);
+  }
+
   tryPop(conversationId: number, now: number = Date.now()): ActorInput | null {
     return this.queues.get(conversationId)?.tryPop(now) ?? null;
+  }
+
+  listQueuedInputs(conversationId: number): ActorInput[] {
+    return this.queues.get(conversationId)?.snapshot() ?? [];
+  }
+
+  drainConversationQueue(conversationId: number): ActorInput[] {
+    const queue = this.queues.get(conversationId);
+    if (!queue) {
+      return [];
+    }
+    const inputs = queue.drain();
+    this.queues.delete(conversationId);
+    return inputs;
   }
 
   pickNextConversationId(now: number = Date.now()): number | null {
@@ -48,6 +82,7 @@ export class SessionManager {
     }
     const dropped = queue.dispose();
     this.queues.delete(conversationId);
+    this.activityStates.delete(conversationId);
     return dropped;
   }
 
@@ -56,6 +91,7 @@ export class SessionManager {
       queue.dispose();
     }
     this.queues.clear();
+    this.activityStates.clear();
   }
 
   private getOrCreateQueue(conversationId: number): SessionQueue<ActorInput> {

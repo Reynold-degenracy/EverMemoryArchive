@@ -57,7 +57,11 @@ type FakeMemoryManager = {
     conversationId: number,
     triggeredAt: number,
     count?: number,
-  ) => Promise<{ messages: []; msgIds: number[] }>;
+  ) => Promise<{
+    messages: [];
+    msgIds: number[];
+    activityTargetMsgIds: number[];
+  }>;
   markConversationMessagesActivityProcessed: (
     conversationId: number,
     msgIds: number[],
@@ -237,6 +241,7 @@ function createFakeServer(
         return {
           messages: [],
           msgIds: snapshot.map((item) => item.msgId),
+          activityTargetMsgIds: snapshot.map((item) => item.msgId),
         };
       },
       async markConversationMessagesActivityProcessed(
@@ -547,6 +552,74 @@ describe("actor background job lifecycle logs", () => {
     });
   });
 
+  test("deferred forced conversation rollup runs after the active rollup releases the lock", async () => {
+    const bufferedMessages = createBufferedMessages(1, 20, 1000);
+    const server = createFakeServer(bufferedMessages);
+    let releaseFirstRun!: () => void;
+    let firstRunStarted!: () => void;
+    const firstRunStartedPromise = new Promise<void>((resolve) => {
+      firstRunStarted = resolve;
+    });
+    const releaseFirstRunPromise = new Promise<void>((resolve) => {
+      releaseFirstRun = resolve;
+    });
+
+    const runWithStateSpy = vi
+      .spyOn(Agent.prototype, "runWithState")
+      .mockImplementation(async (state) => {
+        if (runWithStateSpy.mock.calls.length === 1) {
+          firstRunStarted();
+          if (state.toolContext?.data) {
+            state.toolContext.data.activityAdded = true;
+          }
+          await releaseFirstRunPromise;
+          return;
+        }
+      });
+
+    const thresholdRun = runActorBackgroundJob(
+      server as any,
+      conversationRollupJob(),
+      2000,
+    );
+    await firstRunStartedPromise;
+    bufferedMessages.push({
+      msgId: 21,
+      createdAt: 3000,
+    });
+
+    const forceRun = runActorBackgroundJob(
+      server as any,
+      {
+        ...conversationRollupJob(),
+        addition: { reason: "keep_silence", force: true },
+      },
+      3000,
+    );
+
+    releaseFirstRun();
+    await Promise.all([thresholdRun, forceRun]);
+
+    expect(runWithStateSpy).toHaveBeenCalledTimes(2);
+    expect(
+      bufferedMessages.find((item) => item.msgId === 21)?.activityProcessedAt,
+    ).toEqual(expect.any(Number));
+    expectInfoLog(server, "Actor background task skipped", {
+      actorId: 1,
+      task: "conversation_rollup",
+      conversationId: 1,
+      reason: "already_running",
+      force: true,
+      deferred: true,
+    });
+    expectInfoLog(server, "Actor background task started", {
+      actorId: 1,
+      task: "conversation_rollup",
+      conversationId: 1,
+      force: true,
+    });
+  });
+
   test("conversation rollup logs skipped when the threshold is not reached", async () => {
     const server = createFakeServer(createBufferedMessages(1, 19, 1000));
     const runWithStateSpy = vi.spyOn(Agent.prototype, "runWithState");
@@ -563,6 +636,46 @@ describe("actor background job lifecycle logs", () => {
       pendingAfter: 19,
       threshold: 20,
       followUpScheduled: false,
+    });
+  });
+
+  test("forced conversation rollup runs below threshold and marks messages processed without activity", async () => {
+    const bufferedMessages = createBufferedMessages(1, 3, 1000);
+    const server = createFakeServer(bufferedMessages);
+    const runWithStateSpy = vi
+      .spyOn(Agent.prototype, "runWithState")
+      .mockImplementation(async () => undefined);
+
+    await runActorBackgroundJob(
+      server as any,
+      {
+        ...conversationRollupJob(),
+        addition: { reason: "keep_silence", force: true },
+      },
+      2000,
+    );
+
+    expect(runWithStateSpy).toHaveBeenCalledTimes(1);
+    expect(
+      bufferedMessages.every(
+        (item) => typeof item.activityProcessedAt === "number",
+      ),
+    ).toBe(true);
+    expectInfoLog(server, "Actor background task started", {
+      actorId: 1,
+      task: "conversation_rollup",
+      conversationId: 1,
+      pendingCount: 3,
+      threshold: 20,
+      force: true,
+    });
+    expectInfoLog(server, "Actor background task completed", {
+      actorId: 1,
+      task: "conversation_rollup",
+      conversationId: 1,
+      activityAdded: false,
+      processedMessageCount: 3,
+      force: true,
     });
   });
 
