@@ -197,11 +197,11 @@
     14px
     142px
     154px
-    500px
+    minmax(0, 1fr)
     88px
     14px;
   width: min(100% - 36px, 920px);
-  height: auto;
+  height: min(912px, calc(100dvh - 24px));
   min-height: 0;
   overflow: hidden;
   padding: 0;
