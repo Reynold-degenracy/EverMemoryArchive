@@ -603,13 +603,17 @@
 .createActorSourceGrid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-rows: minmax(0, 1fr);
   gap: 14px;
   width: min(100%, 640px);
+  height: 100%;
+  max-height: 156px;
 }
 
 .createActorSourceCard {
   position: relative;
   display: grid;
+  grid-template-rows: minmax(0, 1fr);
   min-width: 0;
   border-radius: 16px;
   overflow: hidden;
